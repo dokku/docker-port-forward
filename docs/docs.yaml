@@ -1,0 +1,7 @@
+docs:
+  - getting-started.md
+  - command-reference.md
+  - target-resolution.md
+  - compose-integration.md
+  - helper-image.md
+  - limitations.md
