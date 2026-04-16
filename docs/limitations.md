@@ -62,7 +62,7 @@ A process inside the target that binds only to `127.0.0.1` or `::1` cannot be re
 
 **Fix:** rebind the service inside the container to `0.0.0.0` (or the container's network IP). For example, Postgres:
 
-```
+```conf
 listen_addresses = '*'
 ```
 
@@ -108,7 +108,7 @@ Docker Desktop works, but two caveats apply:
 
 Publishing a port below 1024 requires the daemon's user to be privileged. Docker's default installation runs as root, so this usually works — but the preflight check runs in the plugin process (your shell user) and can't bind such ports itself. The preflight is lenient only for IPv6 availability, **not** for permission errors, so you'll see:
 
-```
+```text
 host port 127.0.0.1:80 is not available: listen tcp 127.0.0.1:80: bind: permission denied
 ```
 
