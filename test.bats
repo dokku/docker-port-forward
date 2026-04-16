@@ -18,9 +18,9 @@ export SYSTEM_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-x86_64) ARCH="amd64" ;;
-aarch64) ARCH="arm64" ;;
-arm64) ARCH="arm64" ;;
+  x86_64) ARCH="amd64" ;;
+  aarch64) ARCH="arm64" ;;
+  arm64) ARCH="arm64" ;;
 esac
 export DOCKER_PORT_FORWARD="${BATS_TEST_DIRNAME}/build/${SYSTEM_NAME}/docker-port-forward-${ARCH}"
 export INTEGRATION_LABEL="dpf-bats-integration"
@@ -42,14 +42,20 @@ flunk() {
 
 assert_equal() {
   if [[ "$1" != "$2" ]]; then
-    { echo "expected: $1"; echo "actual:   $2"; } | flunk
+    {
+      echo "expected: $1"
+      echo "actual:   $2"
+    } | flunk
   fi
 }
 
 assert_exit_status() {
   exit_status="$1"
   if [[ "$status" -ne "$exit_status" ]]; then
-    { echo "expected exit status: $exit_status"; echo "actual exit status:   $status"; } | flunk
+    {
+      echo "expected exit status: $exit_status"
+      echo "actual exit status:   $status"
+    } | flunk
   fi
 }
 
@@ -112,7 +118,7 @@ free_port() {
 wait_http() {
   local url="$1"
   local timeout="${2:-10}"
-  local deadline=$(( $(date +%s) + timeout ))
+  local deadline=$(($(date +%s) + timeout))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if curl -fsS -m 2 "$url" >/dev/null 2>&1; then
       return 0
@@ -279,10 +285,10 @@ teardown() {
   NAME="dpf-bats-detach-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PORT:80"
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
   assert_success
   assert_output_contains "Started detached helper \"$NAME\""
 
@@ -302,12 +308,12 @@ teardown() {
   NAME="dpf-bats-labels-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      --label team=backend \
-      --label env=dev \
-      "container/$TARGET" "$PORT:80"
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    --label team=backend \
+    --label env=dev \
+    "container/$TARGET" "$PORT:80"
   assert_success
 
   run docker inspect --format '{{index .Config.Labels "team"}}' "$NAME"
@@ -329,8 +335,8 @@ teardown() {
   PORT=$(free_port)
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --label nokey \
-      "container/$TARGET" "$PORT:80"
+    --detach --label nokey \
+    "container/$TARGET" "$PORT:80"
   assert_failure
   assert_output_contains "invalid --label value"
 
@@ -347,10 +353,10 @@ teardown() {
   NAME="dpf-bats-multi-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$P1:80" "$P2:80"
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$P1:80" "$P2:80"
   assert_success
 
   # One helper, two reachable bindings.
@@ -368,10 +374,10 @@ teardown() {
   NAME="dpf-bats-auto-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET"
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET"
   assert_success
   assert_output_contains "Detected listening ports: 6379"
   assert_output_contains "Forwarding"
@@ -425,9 +431,9 @@ while True: time.sleep(1)
   done
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$BUSY_PORT:80"
+    --detach \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$BUSY_PORT:80"
 
   # Stop the blocker and clean up its log regardless of the assertions below.
   kill "$BLOCKER_PID" 2>/dev/null || true
@@ -448,16 +454,16 @@ while True: time.sleep(1)
   NAME="dpf-bats-idem-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PA:80"
+    --detach --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PA:80"
   assert_success
 
   # Overlap on (PA, 80) plus a new pair (PB, 8080) — should no-op and exit 0.
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PA:80" "$PB:8080"
+    --detach \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PA:80" "$PB:8080"
   assert_success
   assert_output_contains "no action taken"
   assert_output_contains "$NAME"
@@ -475,15 +481,15 @@ while True: time.sleep(1)
   DROP="dpf-bats-drop-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$KEEP" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$P1:80"
+    --detach --name "$KEEP" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$P1:80"
   assert_success
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$DROP" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$P2:80"
+    --detach --name "$DROP" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$P2:80"
   assert_success
 
   run "$DOCKER_PORT_FORWARD" port-forward cleanup --name "$DROP"
@@ -505,9 +511,9 @@ while True: time.sleep(1)
   NAME="dpf-bats-target-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$P1:80"
+    --detach --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$P1:80"
   assert_success
 
   run "$DOCKER_PORT_FORWARD" port-forward cleanup --target "$TARGET"
@@ -525,9 +531,9 @@ while True: time.sleep(1)
   NAME="dpf-bats-dryrun-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$P1:80"
+    --detach --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$P1:80"
   assert_success
 
   run "$DOCKER_PORT_FORWARD" port-forward cleanup --dry-run --target "$TARGET"
@@ -569,9 +575,9 @@ start_udp_echo_target() {
   NAME="dpf-bats-udp-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PORT:9999/udp"
+    --detach --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:9999/udp"
   assert_success
   assert_output_contains "9999/udp"
 
@@ -611,10 +617,10 @@ sys.exit(1)
   NAME="dpf-bats-udp-timeout-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --udp-timeout 123s \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PORT:9999/udp"
+    --detach --name "$NAME" \
+    --udp-timeout 123s \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:9999/udp"
   assert_success
 
   # The helper's Cmd should include the custom -T 123 argument for UDP.
@@ -642,9 +648,9 @@ sys.exit(1)
   NAME="dpf-bats-mixed-$$"
 
   run "$DOCKER_PORT_FORWARD" port-forward \
-      --detach --name "$NAME" \
-      --label "${INTEGRATION_LABEL}=true" \
-      "container/$TARGET" "$PTCP:80" "$PUDP:9999/udp"
+    --detach --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PTCP:80" "$PUDP:9999/udp"
   assert_success
 
   run docker inspect --format '{{json .HostConfig.PortBindings}}' "$NAME"
