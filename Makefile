@@ -59,6 +59,7 @@ build-docker-image:
 $(targets): %-in-docker: .env.docker
 	docker run \
 		--env-file .env.docker \
+		--network host \
 		--pid host \
 		--privileged \
 		--rm \
