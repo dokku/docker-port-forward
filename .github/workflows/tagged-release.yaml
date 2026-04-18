@@ -84,6 +84,9 @@ jobs:
         env:
           BUNDLE_GEMFILE: .github/Gemfile
 
+      - name: Copy install script
+        run: cp install.sh dist/install.sh
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -176,6 +179,14 @@ jobs:
 
           content = replace_sha(content, "amd64", amd64_sha)
           content = replace_sha(content, "arm64", arm64_sha)
+
+          # Ensure the Docker CLI plugin symlink is present in the install block.
+          symlink_line = '    (prefix/"lib/docker/cli-plugins").install_symlink bin/"docker-port-forward" => "docker-pf"'
+          if "docker-pf" not in content:
+              content = content.replace(
+                  'bin.install "docker-port-forward-darwin-#{arch}" => "docker-port-forward"',
+                  'bin.install "docker-port-forward-darwin-#{arch}" => "docker-port-forward"\n' + symlink_line,
+              )
 
           with open(path, "w") as f:
               f.write(content)

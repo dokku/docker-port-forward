@@ -265,6 +265,31 @@ teardown() {
   assert_success
 }
 
+@test "smoke: docker-cli-plugin-metadata is hidden from --help" {
+  run /bin/bash -c "'$DOCKER_PORT_FORWARD' --help 2>&1"
+  assert_success
+  refute_output_contains "docker-cli-plugin-metadata"
+}
+
+@test "smoke: plugin arg stripping routes to port-forward" {
+  run env DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND="docker" "$DOCKER_PORT_FORWARD" pf --help
+  assert_success
+  assert_output_contains "port-forward"
+  assert_output_contains "<target>"
+}
+
+@test "smoke: plugin arg stripping routes cleanup subcommand" {
+  run env DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND="docker" "$DOCKER_PORT_FORWARD" pf cleanup --help
+  assert_success
+  assert_output_contains "--dry-run"
+}
+
+@test "smoke: direct invocation without plugin prefix still works" {
+  run "$DOCKER_PORT_FORWARD" port-forward --help
+  assert_success
+  assert_output_contains "<target>"
+}
+
 @test "smoke: cleanup --help prints flags" {
   run "$DOCKER_PORT_FORWARD" port-forward cleanup --help
   assert_success

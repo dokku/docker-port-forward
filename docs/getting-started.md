@@ -10,23 +10,31 @@ Docker already supports port publishing with `docker run -p`, but only at contai
 
 ## Installation
 
+### One-line install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dokku/docker-port-forward/main/install.sh | sh
+```
+
 ### Build from source
 
 ```bash
 make install
 ```
 
-This builds the plugin binary for your platform and copies it to `~/.docker/cli-plugins/docker-port-forward`.
+This builds the plugin binary for your platform and copies it to `~/.docker/cli-plugins/docker-pf`.
 
 ### Pre-built binaries
 
-Download a tarball from [GitHub Releases](https://github.com/dokku/docker-port-forward/releases) and extract the binary into `~/.docker/cli-plugins/` (create that directory if it does not exist). The binary must be named `docker-port-forward` and be executable.
+Download a binary from [GitHub Releases](https://github.com/dokku/docker-port-forward/releases) and place it in `~/.docker/cli-plugins/`. The binary must be named `docker-pf` and be executable.
 
 ```bash
-install -m 0755 docker-port-forward ~/.docker/cli-plugins/docker-port-forward
+install -m 0755 docker-port-forward-linux-amd64 ~/.docker/cli-plugins/docker-pf
 ```
 
-Once installed, `docker port-forward --help` should print the usage text.
+Once installed, `docker pf --help` should print the usage text.
+
+> **Direct invocation:** The binary can also be run directly as `docker-port-forward port-forward TARGET ...` without installing it as a plugin.
 
 ## Your first forward
 
@@ -39,7 +47,7 @@ docker run -d --name demo nginx
 `nginx` in this image listens on port 80 inside the container, but the port is not published to the host. Forward it:
 
 ```bash
-docker port-forward demo 8080:80
+docker pf demo 8080:80
 ```
 
 Leave that process running. In another terminal:

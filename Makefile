@@ -1,4 +1,5 @@
 NAME = docker-port-forward
+PLUGIN_NAME = docker-pf
 EMAIL = docker-port-forward@josediazgonzalez.com
 MAINTAINER = dokku
 MAINTAINER_NAME = Jose Diaz-Gonzalez
@@ -41,9 +42,9 @@ targets = $(addsuffix -in-docker, $(LIST))
 	@echo "VERSION=$(VERSION)" >> .env.docker
 
 install:
-	@$(MAKE) build/$(shell uname -s | tr A-Z a-z)/$(NAME)-arm64
-	mkdir -p ~/.docker/cli-plugins
-	cp build/$(shell uname -s | tr A-Z a-z)/$(NAME)-arm64 ~/.docker/cli-plugins/$(NAME)
+	@$(MAKE) build/$(SYSTEM_NAME)/$(NAME)-$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+	mkdir -p $(HOME)/.docker/cli-plugins
+	cp build/$(SYSTEM_NAME)/$(NAME)-$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') $(HOME)/.docker/cli-plugins/$(PLUGIN_NAME)
 
 build: prebuild
 	@$(MAKE) build/darwin/$(NAME)-amd64
@@ -130,6 +131,7 @@ build/deb/$(NAME)_$(VERSION)_amd64.deb: build/linux/$(NAME)-amd64
 		--version $(VERSION) \
 		--verbose \
 		build/linux/$(NAME)-amd64=/usr/bin/$(NAME) \
+		build/linux/$(NAME)-amd64=/usr/libexec/docker/cli-plugins/$(PLUGIN_NAME) \
 		LICENSE=/usr/share/doc/$(NAME)/copyright
 
 build/deb/$(NAME)_$(VERSION)_arm64.deb: build/linux/$(NAME)-arm64
@@ -152,6 +154,7 @@ build/deb/$(NAME)_$(VERSION)_arm64.deb: build/linux/$(NAME)-arm64
 		--version $(VERSION) \
 		--verbose \
 		build/linux/$(NAME)-arm64=/usr/bin/$(NAME) \
+		build/linux/$(NAME)-arm64=/usr/libexec/docker/cli-plugins/$(PLUGIN_NAME) \
 		LICENSE=/usr/share/doc/$(NAME)/copyright
 
 clean:
