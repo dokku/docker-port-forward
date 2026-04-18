@@ -3,7 +3,11 @@
 ## Synopsis
 
 ```bash
-docker port-forward TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
+# As a Docker CLI plugin:
+docker pf TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
+
+# Direct invocation:
+docker-port-forward port-forward TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
 ```
 
 ## Arguments
@@ -31,7 +35,7 @@ The protocol suffix is case-insensitive. An omitted suffix defaults to TCP. Only
 TCP and UDP may be mixed in a single invocation:
 
 ```bash
-docker port-forward my-container 8080:80 53:53/udp
+docker pf my-container 8080:80 53:53/udp
 ```
 
 Multiple port specs may be provided. If no port specs are given, the command probes the target for listening sockets (TCP + UDP) and forwards each on the same host port. See [Auto-detection](#auto-detection).
@@ -64,7 +68,7 @@ When no port specs are supplied, the command starts a short-lived probe containe
 
 ## Idempotency
 
-If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker port-forward ... --detach` from scripts.
+If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts.
 
 ## Preflight host-port check
 
@@ -75,85 +79,85 @@ Before creating a helper, the command briefly tries to `Listen()` on each reques
 Forward a single port:
 
 ```bash
-docker port-forward my-container 8080:80
+docker pf my-container 8080:80
 ```
 
 Forward using the same local and remote port:
 
 ```bash
-docker port-forward my-container 5000
+docker pf my-container 5000
 ```
 
 Let the OS pick a local port:
 
 ```bash
-docker port-forward my-container :5000
+docker pf my-container :5000
 ```
 
 Forward several ports at once:
 
 ```bash
-docker port-forward my-container 8080:80 5432:5432 :6379
+docker pf my-container 8080:80 5432:5432 :6379
 ```
 
 Auto-detect every non-loopback listener in the container (TCP + UDP) and forward each on the same host port:
 
 ```bash
-docker port-forward my-container
+docker pf my-container
 ```
 
 Forward a UDP port (DNS):
 
 ```bash
-docker port-forward my-dns 5353:53/udp
+docker pf my-dns 5353:53/udp
 ```
 
 Mix TCP and UDP in one invocation:
 
 ```bash
-docker port-forward my-app 8080:80 53:53/udp
+docker pf my-app 8080:80 53:53/udp
 ```
 
 Increase UDP idle timeout for a chatty forward:
 
 ```bash
-docker port-forward --udp-timeout 10m my-app 53:53/udp
+docker pf --udp-timeout 10m my-app 53:53/udp
 ```
 
 Run in the background and give the helper an explicit name:
 
 ```bash
-docker port-forward --detach --name mydb my-db 5432:5432
+docker pf --detach --name mydb my-db 5432:5432
 ```
 
 Add extra labels to the helper container (useful for your own `docker ps --filter` queries):
 
 ```bash
-docker port-forward --label team=backend --label env=dev my-container 8080:80
+docker pf --label team=backend --label env=dev my-container 8080:80
 ```
 
 Forward to a specific container by ID:
 
 ```bash
-docker port-forward container/abc123 8080:80
+docker pf container/abc123 8080:80
 ```
 
 Forward to a Compose service by name:
 
 ```bash
-docker port-forward service/web 8080:80
+docker pf service/web 8080:80
 ```
 
 Bind all interfaces:
 
 ```bash
-docker port-forward --address 0.0.0.0 my-container 8080:80
+docker pf --address 0.0.0.0 my-container 8080:80
 ```
 
 Forward to a Compose service with explicit compose files and project name:
 
 ```bash
-docker port-forward -f docker-compose.yml -f docker-compose.dev.yml -p proj service/api 3000:3000
+docker pf -f docker-compose.yml -f docker-compose.dev.yml -p proj service/api 3000:3000
 ```
 
 ## Exit behavior
@@ -165,7 +169,7 @@ In attached mode the command blocks until it receives `SIGINT` (Ctrl-C) or `SIGT
 Remove leftover helper sidecar containers.
 
 ```bash
-docker port-forward cleanup [flags]
+docker pf cleanup [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -177,10 +181,10 @@ docker port-forward cleanup [flags]
 Examples:
 
 ```bash
-docker port-forward cleanup
-docker port-forward cleanup --dry-run
-docker port-forward cleanup --target my-container
-docker port-forward cleanup --name port-forward-mydb-a9c2
+docker pf cleanup
+docker pf cleanup --dry-run
+docker pf cleanup --target my-container
+docker pf cleanup --name port-forward-mydb-a9c2
 ```
 
 The command prints one line per matching helper (`<short-id>  name=<name> target=<target-short-id> ports=<ports>`) and a summary. Exit code is zero when all matching helpers were removed (or when none were found), non-zero when some removals failed.

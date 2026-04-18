@@ -26,11 +26,15 @@ func Run(args []string) int {
 	ctx := context.Background()
 	commandMeta := command.SetupRun(ctx, AppName, Version, args)
 	commandMeta.Ui = command.HumanZerologUiWithFields(commandMeta.Ui, make(map[string]interface{}, 0))
-	// When invoked as a Docker CLI plugin, Docker execs us as
-	//   docker-port-forward port-forward <user args>
-	// so os.Args[1:] naturally starts with "port-forward" which the inner
-	// CLI will dispatch to the PortForwardCommand.
+	// When invoked by `docker pf ...`, Docker CLI prepends the
+	// plugin name as argv[1] and sets DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND.
+	// Strip "pf" and implicitly route to the "port-forward" subcommand so
+	// users type `docker pf TARGET ...` instead of `docker pf port-forward TARGET ...`.
 	cliArgs := os.Args[1:]
+	if os.Getenv("DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND") != "" &&
+		len(os.Args) > 1 && os.Args[1] == "pf" {
+		cliArgs = append([]string{"port-forward"}, os.Args[2:]...)
+	}
 
 	c := cli.NewCLI(AppName, Version)
 	c.Args = cliArgs
