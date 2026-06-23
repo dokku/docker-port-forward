@@ -3,7 +3,7 @@ module github.com/dokku/docker-port-forward
 go 1.26.2
 
 require (
-	github.com/compose-spec/compose-go/v2 v2.11.0
+	github.com/compose-spec/compose-go/v2 v2.12.1
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/docker/go-connections v0.7.0
 	github.com/josegonzalez/cli-skeleton v0.25.0
