@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/compose-spec/compose-go/v2 v2.13.0
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/docker/go-connections v0.8.0
+	github.com/docker/go-connections v0.8.1
 	github.com/josegonzalez/cli-skeleton v0.25.0
 	github.com/mitchellh/cli v1.1.5
 	github.com/opencontainers/image-spec v1.1.1
