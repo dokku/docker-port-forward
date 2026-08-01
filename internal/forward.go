@@ -8,16 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 )
 
 // Defaults and well-known labels set on helper containers.
@@ -191,13 +190,13 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	if err != nil {
 		return ForwardResult{}, fmt.Errorf("error creating helper container: %v", err)
 	}
-	if err := in.Client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = in.Client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+	if err := in.Client.ContainerStart(ctx, resp.ID, dockerClient.ContainerStartOptions{}); err != nil {
+		_ = in.Client.ContainerRemove(ctx, resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 		return ForwardResult{}, fmt.Errorf("error starting helper container: %v", err)
 	}
 
 	if err := waitForRunning(ctx, in.Client, resp.ID, in.RunningTimeout); err != nil {
-		_ = in.Client.ContainerRemove(context.Background(), resp.ID, container.RemoveOptions{Force: true})
+		_ = in.Client.ContainerRemove(context.Background(), resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 		return ForwardResult{}, fmt.Errorf("helper container did not start: %v", err)
 	}
 
@@ -368,7 +367,7 @@ func ensureHelperImage(ctx context.Context, cli DockerClientInterface, ref, poli
 
 func pullImage(ctx context.Context, cli DockerClientInterface, ref string, logger Logger) error {
 	logger.Info(fmt.Sprintf("Pulling helper image %s", ref))
-	rc, err := cli.ImagePull(ctx, ref, image.PullOptions{})
+	rc, err := cli.ImagePull(ctx, ref, dockerClient.ImagePullOptions{})
 	if err != nil {
 		return fmt.Errorf("error pulling helper image %s: %v", ref, err)
 	}
@@ -433,15 +432,21 @@ func buildHelperContainerConfig(
 	}
 	shCmd.WriteString("wait")
 
-	exposed := nat.PortSet{}
-	bindings := nat.PortMap{}
+	exposed := network.PortSet{}
+	bindings := network.PortMap{}
 	for _, p := range pairs {
 		proto := string(NormalizeProtocol(p.Protocol))
-		port, _ := nat.NewPort(proto, strconv.Itoa(p.RemotePort))
+		port, err := network.ParsePort(strconv.Itoa(p.RemotePort) + "/" + proto)
+		if err != nil {
+			continue
+		}
 		exposed[port] = struct{}{}
 		for _, addr := range addresses {
-			bindings[port] = append(bindings[port], nat.PortBinding{
-				HostIP:   addr,
+			// HostIP is a netip.Addr in the moby API; a non-IP address yields
+			// the zero value, which the daemon treats as "all interfaces".
+			hostIP, _ := netip.ParseAddr(addr)
+			bindings[port] = append(bindings[port], network.PortBinding{
+				HostIP:   hostIP,
 				HostPort: strconv.Itoa(p.LocalPort),
 			})
 		}
@@ -496,13 +501,13 @@ func pickTargetNetwork(info container.InspectResponse) (networkName string, targ
 	if len(userDefined) > 0 {
 		for _, name := range userDefined {
 			endpoint := info.NetworkSettings.Networks[name]
-			if endpoint != nil && endpoint.IPAddress != "" {
-				return name, endpoint.IPAddress, nil
+			if endpoint != nil && endpoint.IPAddress.IsValid() {
+				return name, endpoint.IPAddress.String(), nil
 			}
 		}
 	}
-	if endpoint, ok := info.NetworkSettings.Networks["bridge"]; ok && endpoint != nil && endpoint.IPAddress != "" {
-		return "bridge", endpoint.IPAddress, nil
+	if endpoint, ok := info.NetworkSettings.Networks["bridge"]; ok && endpoint != nil && endpoint.IPAddress.IsValid() {
+		return "bridge", endpoint.IPAddress.String(), nil
 	}
 	return "", "", errors.New("target container has no routable IP address")
 }
@@ -563,12 +568,12 @@ func stopAndRemove(cli DockerClientInterface, id string, logger Logger) {
 	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopTimeout := 1
-	if err := cli.ContainerStop(stopCtx, id, container.StopOptions{Timeout: &stopTimeout}); err != nil {
+	if err := cli.ContainerStop(stopCtx, id, dockerClient.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
 		if !isNoSuchContainer(err) {
 			logger.Warn(fmt.Sprintf("error stopping helper container %s: %v", shortID(id), err))
 		}
 	}
-	if err := cli.ContainerRemove(stopCtx, id, container.RemoveOptions{Force: true}); err != nil {
+	if err := cli.ContainerRemove(stopCtx, id, dockerClient.ContainerRemoveOptions{Force: true}); err != nil {
 		if !isNoSuchContainer(err) && !strings.Contains(strings.ToLower(err.Error()), "already in progress") {
 			logger.Warn(fmt.Sprintf("error removing helper container %s: %v", shortID(id), err))
 		}
@@ -578,12 +583,12 @@ func stopAndRemove(cli DockerClientInterface, id string, logger Logger) {
 // ListHelpers returns helper containers created by this plugin, optionally
 // filtered to a single target id.
 func ListHelpers(ctx context.Context, cli DockerClientInterface, targetID string) ([]container.Summary, error) {
-	f := filters.NewArgs()
+	f := make(dockerClient.Filters)
 	f.Add("label", LabelPortForward+"=true")
 	if targetID != "" {
 		f.Add("label", LabelTarget+"="+targetID)
 	}
-	return cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	return cli.ContainerList(ctx, dockerClient.ContainerListOptions{All: true, Filters: f})
 }
 
 // RemoveHelpers force-removes the given helper containers. "No such container"
@@ -591,7 +596,7 @@ func ListHelpers(ctx context.Context, cli DockerClientInterface, targetID string
 func RemoveHelpers(ctx context.Context, cli DockerClientInterface, ids []string, logger Logger) int {
 	removed := 0
 	for _, id := range ids {
-		err := cli.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+		err := cli.ContainerRemove(ctx, id, dockerClient.ContainerRemoveOptions{Force: true})
 		if err != nil {
 			if isNoSuchContainer(err) || strings.Contains(strings.ToLower(err.Error()), "already in progress") {
 				removed++
