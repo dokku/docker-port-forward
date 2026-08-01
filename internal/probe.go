@@ -11,9 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 )
 
 // Listener is a detected listening socket inside the target's netns.
@@ -72,10 +73,10 @@ func ProbeListeners(ctx context.Context, cli DockerClientInterface, targetID, he
 	defer func() {
 		rmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = cli.ContainerRemove(rmCtx, resp.ID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(rmCtx, resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 	}()
 
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if err := cli.ContainerStart(ctx, resp.ID, dockerClient.ContainerStartOptions{}); err != nil {
 		return nil, fmt.Errorf("error starting port probe: %v", err)
 	}
 
@@ -90,7 +91,7 @@ func ProbeListeners(ctx context.Context, cli DockerClientInterface, targetID, he
 		return nil, fmt.Errorf("port probe timed out")
 	}
 
-	logs, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{ShowStdout: true, ShowStderr: false})
+	logs, err := cli.ContainerLogs(ctx, resp.ID, dockerClient.ContainerLogsOptions{ShowStdout: true, ShowStderr: false})
 	if err != nil {
 		return nil, fmt.Errorf("error reading port probe logs: %v", err)
 	}

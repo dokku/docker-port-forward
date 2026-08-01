@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	dockerClient "github.com/docker/docker/client"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	dockerClient "github.com/moby/moby/client"
 )
 
 // Compose label keys used for service/container resolution.
@@ -119,11 +119,11 @@ func resolveContainer(ctx context.Context, cli DockerClientInterface, nameOrID s
 }
 
 func resolveService(ctx context.Context, cli DockerClientInterface, projectName, serviceName string) (ResolvedTarget, error) {
-	f := filters.NewArgs()
+	f := make(dockerClient.Filters)
 	f.Add("label", fmt.Sprintf("%s=%s", ComposeProjectLabel, projectName))
 	f.Add("label", fmt.Sprintf("%s=%s", ComposeServiceLabel, serviceName))
 
-	list, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
+	list, err := cli.ContainerList(ctx, dockerClient.ContainerListOptions{All: true, Filters: f})
 	if err != nil {
 		return ResolvedTarget{}, fmt.Errorf("error listing containers: %v", err)
 	}
@@ -161,7 +161,7 @@ func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if dockerClient.IsErrNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		return true
 	}
 	// Fallback: some errors don't implement the docker error interface cleanly.

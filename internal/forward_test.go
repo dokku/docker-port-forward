@@ -5,13 +5,15 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -45,7 +47,7 @@ func TestExpandAddresses(t *testing.T) {
 func TestEnsureHelperImage_AlwaysPulls(t *testing.T) {
 	pulled := false
 	cli := &mockDockerClient{
-		imagePull: func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+		imagePull: func(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error) {
 			pulled = true
 			if ref != "alpine/socat" {
 				t.Fatalf("expected ref alpine/socat, got %q", ref)
@@ -79,7 +81,7 @@ func TestEnsureHelperImage_MissingPullsIfAbsent(t *testing.T) {
 		imageInspect: func(ctx context.Context, id string) (image.InspectResponse, error) {
 			return image.InspectResponse{}, errors.New("no such image")
 		},
-		imagePull: func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+		imagePull: func(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error) {
 			pulled = true
 			return io.NopCloser(strings.NewReader("")), nil
 		},
@@ -98,7 +100,7 @@ func TestEnsureHelperImage_MissingSkipsIfPresent(t *testing.T) {
 		imageInspect: func(ctx context.Context, id string) (image.InspectResponse, error) {
 			return image.InspectResponse{ID: "sha"}, nil
 		},
-		imagePull: func(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+		imagePull: func(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error) {
 			pulled = true
 			return io.NopCloser(strings.NewReader("")), nil
 		},
@@ -174,7 +176,7 @@ func TestBuildHelperContainerConfig(t *testing.T) {
 	// each duplicated per address (127.0.0.1 and ::1).
 	port80 := "80/tcp"
 	for port, bindings := range hostCfg.PortBindings {
-		if string(port) == port80 {
+		if port.String() == port80 {
 			if len(bindings) != 4 {
 				t.Fatalf("expected 4 bindings for 80/tcp (2 locals x 2 addrs), got %d: %+v", len(bindings), bindings)
 			}
@@ -225,10 +227,10 @@ func TestBuildHelperContainerConfig_UDPSpawnsTimedSocat(t *testing.T) {
 	foundTCP := false
 	foundUDP := false
 	for port := range hostCfg.PortBindings {
-		if port.Proto() == "tcp" && port.Int() == 80 {
+		if port.Proto() == "tcp" && int(port.Num()) == 80 {
 			foundTCP = true
 		}
-		if port.Proto() == "udp" && port.Int() == 53 {
+		if port.Proto() == "udp" && int(port.Num()) == 53 {
 			foundUDP = true
 		}
 	}
@@ -266,9 +268,9 @@ func TestPickTargetNetwork_PrefersUserDefined(t *testing.T) {
 	info := container.InspectResponse{
 		NetworkSettings: &container.NetworkSettings{
 			Networks: map[string]*network.EndpointSettings{
-				"bridge":  {IPAddress: "172.17.0.5"},
-				"my-net":  {IPAddress: "10.0.0.5"},
-				"alt-net": {IPAddress: "10.1.0.5"},
+				"bridge":  {IPAddress: netip.MustParseAddr("172.17.0.5")},
+				"my-net":  {IPAddress: netip.MustParseAddr("10.0.0.5")},
+				"alt-net": {IPAddress: netip.MustParseAddr("10.1.0.5")},
 			},
 		},
 	}
@@ -288,7 +290,7 @@ func TestPickTargetNetwork_BridgeFallback(t *testing.T) {
 	info := container.InspectResponse{
 		NetworkSettings: &container.NetworkSettings{
 			Networks: map[string]*network.EndpointSettings{
-				"bridge": {IPAddress: "172.17.0.5"},
+				"bridge": {IPAddress: netip.MustParseAddr("172.17.0.5")},
 			},
 		},
 	}
@@ -314,7 +316,7 @@ func TestPickTargetNetwork_NoUsable(t *testing.T) {
 
 func TestFindOverlappingHelper_FindsSharedPair(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return []container.Summary{
 				{
 					ID:     "existing-1",
@@ -340,7 +342,7 @@ func TestFindOverlappingHelper_FindsSharedPair(t *testing.T) {
 
 func TestFindOverlappingHelper_IgnoresStopped(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return []container.Summary{
 				{
 					ID:     "stopped",
@@ -361,7 +363,7 @@ func TestFindOverlappingHelper_IgnoresStopped(t *testing.T) {
 
 func TestFindOverlappingHelper_NoMatchWhenPortsDiffer(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return []container.Summary{
 				{
 					ID:     "existing",
@@ -559,7 +561,7 @@ func TestWaitForRunning_TimesOut(t *testing.T) {
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: false}},
+				State: &container.State{Running: false},
 			}, nil
 		},
 	}
@@ -576,7 +578,7 @@ func TestWaitForRunning_Succeeds(t *testing.T) {
 			calls++
 			running := calls > 2
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Running: running}},
+				State: &container.State{Running: running},
 			}, nil
 		},
 	}
@@ -589,7 +591,7 @@ func TestWaitForRunning_DetectsExitedContainer(t *testing.T) {
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 1}},
+				State: &container.State{Status: "exited", ExitCode: 1},
 			}, nil
 		},
 	}
@@ -604,19 +606,9 @@ func TestWaitForRunning_DetectsExitedContainer(t *testing.T) {
 
 func TestListHelpers_FiltersByTarget(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
-			labels := options.Filters.Get("label")
-			hasForward := false
-			hasTarget := false
-			for _, v := range labels {
-				if v == LabelPortForward+"=true" {
-					hasForward = true
-				}
-				if v == LabelTarget+"=target-sha" {
-					hasTarget = true
-				}
-			}
-			if !hasForward || !hasTarget {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+			labels := options.Filters["label"]
+			if !labels[LabelPortForward+"=true"] || !labels[LabelTarget+"=target-sha"] {
 				t.Fatalf("missing expected label filters: %v", labels)
 			}
 			return []container.Summary{{ID: "h-1"}}, nil
@@ -633,9 +625,9 @@ func TestListHelpers_FiltersByTarget(t *testing.T) {
 
 func TestListHelpers_NoTargetFilter(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
-			labels := options.Filters.Get("label")
-			if len(labels) != 1 || labels[0] != LabelPortForward+"=true" {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+			labels := options.Filters["label"]
+			if len(labels) != 1 || !labels[LabelPortForward+"=true"] {
 				t.Fatalf("expected only the port-forward label, got %v", labels)
 			}
 			return []container.Summary{{ID: "h-1"}, {ID: "h-2"}}, nil
@@ -650,10 +642,32 @@ func TestListHelpers_NoTargetFilter(t *testing.T) {
 	}
 }
 
+// TestListHelpers_SetsAllAndLabelFilter locks in the migration to the
+// github.com/moby/moby/client Filters map: ListHelpers must request all
+// containers and populate the "label" filter term with the port-forward label.
+func TestListHelpers_SetsAllAndLabelFilter(t *testing.T) {
+	var got dockerClient.ContainerListOptions
+	cli := &mockDockerClient{
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+			got = options
+			return nil, nil
+		},
+	}
+	if _, err := ListHelpers(context.Background(), cli, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.All {
+		t.Fatal("expected ListHelpers to request all containers")
+	}
+	if !got.Filters["label"][LabelPortForward+"=true"] {
+		t.Fatalf("expected port-forward label filter to be set, got %+v", got.Filters)
+	}
+}
+
 func TestRemoveHelpers_CountsSuccessesAndSuppressesMissing(t *testing.T) {
 	logger := &captureLogger{}
 	cli := &mockDockerClient{
-		containerRemove: func(ctx context.Context, id string, options container.RemoveOptions) error {
+		containerRemove: func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
 			switch id {
 			case "gone":
 				return errors.New("Error: No such container: gone")
@@ -677,10 +691,10 @@ func TestRemoveHelpers_CountsSuccessesAndSuppressesMissing(t *testing.T) {
 func TestCleanupStaleHelpers_RemovesAllListed(t *testing.T) {
 	removedIDs := []string{}
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return []container.Summary{{ID: "stale-1"}, {ID: "stale-2"}}, nil
 		},
-		containerRemove: func(ctx context.Context, id string, options container.RemoveOptions) error {
+		containerRemove: func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
 			removedIDs = append(removedIDs, id)
 			return nil
 		},
@@ -695,16 +709,14 @@ func TestCleanupStaleHelpers_RemovesAllListed(t *testing.T) {
 // network so network selection during StartForward can succeed.
 func newInspectResponseForNetwork(id string) container.InspectResponse {
 	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{
-			ID:   id,
-			Name: "/target",
-			State: &container.State{
-				Running: true,
-			},
+		ID:   id,
+		Name: "/target",
+		State: &container.State{
+			Running: true,
 		},
 		NetworkSettings: &container.NetworkSettings{
 			Networks: map[string]*network.EndpointSettings{
-				"bridge": {IPAddress: "172.17.0.5"},
+				"bridge": {IPAddress: netip.MustParseAddr("172.17.0.5")},
 			},
 		},
 	}
@@ -716,7 +728,7 @@ func TestStartForward_IdempotentOnOverlap(t *testing.T) {
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return newInspectResponseForNetwork(id), nil
 		},
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			listCalls++
 			return []container.Summary{
 				{
@@ -768,7 +780,7 @@ func TestStartForward_DetachedCreatesHelper(t *testing.T) {
 			// Subsequent inspects after create() are the helper's; always running.
 			return info, nil
 		},
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return nil, nil
 		},
 		imageInspect: func(ctx context.Context, id string) (image.InspectResponse, error) {
@@ -787,7 +799,7 @@ func TestStartForward_DetachedCreatesHelper(t *testing.T) {
 			}
 			return container.CreateResponse{ID: "new-helper"}, nil
 		},
-		containerStart: func(ctx context.Context, id string, options container.StartOptions) error {
+		containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
 			started = true
 			return nil
 		},
@@ -833,7 +845,7 @@ func TestStartForward_PreflightFailsOnBusyPort(t *testing.T) {
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return newInspectResponseForNetwork(id), nil
 		},
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return nil, nil
 		},
 		containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {

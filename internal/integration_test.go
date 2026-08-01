@@ -22,10 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	dockerClient "github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	dockerClient "github.com/moby/moby/client"
 )
 
 const (
@@ -52,7 +51,7 @@ func setupIntegration(t *testing.T) (context.Context, DockerClientInterface) {
 	ctx := context.Background()
 
 	// Fast failure if the daemon isn't reachable.
-	if _, err := cli.ContainerList(ctx, container.ListOptions{Limit: 1}); err != nil {
+	if _, err := cli.ContainerList(ctx, dockerClient.ContainerListOptions{Limit: 1}); err != nil {
 		t.Skipf("integration test skipped: Docker daemon not reachable: %v", err)
 	}
 
@@ -71,7 +70,7 @@ func ensureImage(t *testing.T, ctx context.Context, cli DockerClientInterface, r
 	if _, err := cli.ImageInspect(ctx, ref); err == nil {
 		return
 	}
-	rc, err := cli.ImagePull(ctx, ref, image.PullOptions{})
+	rc, err := cli.ImagePull(ctx, ref, dockerClient.ImagePullOptions{})
 	if err != nil {
 		t.Fatalf("failed to pull %s: %v", ref, err)
 	}
@@ -99,8 +98,8 @@ func startNginxTarget(t *testing.T, ctx context.Context, cli DockerClientInterfa
 	if err != nil {
 		t.Fatalf("failed to create nginx target: %v", err)
 	}
-	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+	if err := cli.ContainerStart(ctx, resp.ID, dockerClient.ContainerStartOptions{}); err != nil {
+		_ = cli.ContainerRemove(ctx, resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 		t.Fatalf("failed to start nginx target: %v", err)
 	}
 
@@ -112,7 +111,7 @@ func startNginxTarget(t *testing.T, ctx context.Context, cli DockerClientInterfa
 			return resp.ID
 		}
 		if time.Now().After(deadline) {
-			_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			_ = cli.ContainerRemove(ctx, resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 			t.Fatalf("nginx target did not reach running state in time")
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -123,14 +122,14 @@ func startNginxTarget(t *testing.T, ctx context.Context, cli DockerClientInterfa
 // both teardown and a safety net.
 func cleanupByLabel(t *testing.T, ctx context.Context, cli DockerClientInterface, label string) {
 	t.Helper()
-	list, err := cli.ContainerList(ctx, container.ListOptions{All: true})
+	list, err := cli.ContainerList(ctx, dockerClient.ContainerListOptions{All: true})
 	if err != nil {
 		return
 	}
 	key, val, _ := strings.Cut(label, "=")
 	for _, c := range list {
 		if c.Labels[key] == val || c.Labels[LabelPortForward] == "true" {
-			_ = cli.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
+			_ = cli.ContainerRemove(ctx, c.ID, dockerClient.ContainerRemoveOptions{Force: true})
 		}
 	}
 }
@@ -188,7 +187,7 @@ func TestIntegration_DetachedForwardIsReachable(t *testing.T) {
 		t.Fatalf("StartForward returned error: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cli.ContainerRemove(ctx, result.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	})
 
 	if result.Existing {
@@ -243,7 +242,7 @@ func TestIntegration_DetachedAppliesExtraLabels(t *testing.T) {
 		t.Fatalf("StartForward returned error: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cli.ContainerRemove(ctx, result.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	})
 
 	info, err := cli.ContainerInspect(ctx, result.HelperID)
@@ -254,11 +253,11 @@ func TestIntegration_DetachedAppliesExtraLabels(t *testing.T) {
 		t.Fatal("helper config is nil")
 	}
 	for k, want := range map[string]string{
-		"team":             "backend",
-		"env":              "dev",
-		LabelPortForward:   "true",
-		LabelTarget:        targetID,
-		LabelName:          result.HelperName,
+		"team":           "backend",
+		"env":            "dev",
+		LabelPortForward: "true",
+		LabelTarget:      targetID,
+		LabelName:        result.HelperName,
 	} {
 		if got := info.Config.Labels[k]; got != want {
 			t.Errorf("label %q: got %q, want %q", k, got, want)
@@ -307,7 +306,7 @@ func TestIntegration_IdempotentOverlapReusesHelper(t *testing.T) {
 		t.Fatalf("first StartForward: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cli.ContainerRemove(ctx, first.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, first.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	})
 	if first.Existing {
 		t.Fatal("first call should create a new helper")
@@ -379,7 +378,7 @@ func TestIntegration_PreflightRejectsBusyHostPort(t *testing.T) {
 	if err == nil {
 		// Defensive: if a helper did get created, tear it down before failing.
 		if result.HelperID != "" {
-			_ = cli.ContainerRemove(ctx, result.HelperID, container.RemoveOptions{Force: true})
+			_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 		}
 		t.Fatal("expected preflight to reject conflicting host port, got no error")
 	}
@@ -426,7 +425,7 @@ func TestIntegration_MultiplePortsOneHelper(t *testing.T) {
 		t.Fatalf("StartForward: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cli.ContainerRemove(ctx, result.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	})
 
 	for _, p := range ports {
@@ -446,7 +445,7 @@ func TestIntegration_MultiplePortsOneHelper(t *testing.T) {
 	if info.HostConfig == nil {
 		t.Fatal("missing HostConfig")
 	}
-	bindings := info.HostConfig.PortBindings["80/tcp"]
+	bindings := info.HostConfig.PortBindings[network.MustParsePort("80/tcp")]
 	if len(bindings) != 2 {
 		t.Fatalf("expected 2 bindings for 80/tcp, got %d: %+v", len(bindings), bindings)
 	}
@@ -492,9 +491,9 @@ func TestIntegration_UDPForwardRoundTrip(t *testing.T) {
 		t.Fatalf("create udp echo: %v", err)
 	}
 	defer func() {
-		_ = cli.ContainerRemove(ctx, echoResp.ID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, echoResp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 	}()
-	if err := cli.ContainerStart(ctx, echoResp.ID, container.StartOptions{}); err != nil {
+	if err := cli.ContainerStart(ctx, echoResp.ID, dockerClient.ContainerStartOptions{}); err != nil {
 		t.Fatalf("start udp echo: %v", err)
 	}
 
@@ -529,7 +528,7 @@ func TestIntegration_UDPForwardRoundTrip(t *testing.T) {
 		t.Fatalf("StartForward UDP: %v", err)
 	}
 	defer func() {
-		_ = cli.ContainerRemove(ctx, result.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	}()
 
 	// Helper config must expose udp, not tcp.
@@ -539,7 +538,7 @@ func TestIntegration_UDPForwardRoundTrip(t *testing.T) {
 	}
 	foundUDP := false
 	for p := range info.HostConfig.PortBindings {
-		if p.Proto() == "udp" && p.Int() == 9999 {
+		if p.Proto() == "udp" && int(p.Num()) == 9999 {
 			foundUDP = true
 		}
 	}
@@ -628,7 +627,7 @@ func TestIntegration_CleanupByNameRemovesOnlyThatHelper(t *testing.T) {
 		t.Fatalf("first StartForward: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cli.ContainerRemove(ctx, keep.HelperID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, keep.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
 	})
 
 	nameDrop := integrationPrefix + "drop-" + randomHex(4)
@@ -695,4 +694,4 @@ func allocatePorts(t *testing.T, n int) []int {
 
 // Compile-time guard to make sure we pulled in all the packages we actually
 // use in the build tagged above. Prevents accidental removal.
-var _ = dockerClient.ErrorConnectionFailed
+var _ = dockerClient.IsErrConnectionFailed

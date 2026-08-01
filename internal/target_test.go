@@ -2,11 +2,12 @@ package internal
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	dockerClient "github.com/moby/moby/client"
 )
 
 func TestParseTarget(t *testing.T) {
@@ -51,11 +52,9 @@ func TestResolveTarget_ContainerPrefix(t *testing.T) {
 				t.Fatalf("expected inspect id=foo, got %q", id)
 			}
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{
-					ID:    "sha-foo",
-					Name:  "/foo",
-					State: &container.State{Running: true},
-				},
+				ID:    "sha-foo",
+				Name:  "/foo",
+				State: &container.State{Running: true},
 			}, nil
 		},
 	}
@@ -75,11 +74,9 @@ func TestResolveTarget_ContainerNotRunning(t *testing.T) {
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{
-					ID:    "sha-foo",
-					Name:  "/foo",
-					State: &container.State{Running: false},
-				},
+				ID:    "sha-foo",
+				Name:  "/foo",
+				State: &container.State{Running: false},
 			}, nil
 		},
 	}
@@ -94,20 +91,10 @@ func TestResolveTarget_ContainerNotRunning(t *testing.T) {
 
 func TestResolveTarget_ServicePicksLowestInstance(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			// Assert the filter was set correctly for project + service.
-			values := options.Filters.Get("label")
-			foundProject := false
-			foundService := false
-			for _, v := range values {
-				if v == ComposeProjectLabel+"=proj" {
-					foundProject = true
-				}
-				if v == ComposeServiceLabel+"=web" {
-					foundService = true
-				}
-			}
-			if !foundProject || !foundService {
+			values := options.Filters["label"]
+			if !values[ComposeProjectLabel+"=proj"] || !values[ComposeServiceLabel+"=web"] {
 				t.Fatalf("missing label filters in %v", values)
 			}
 			return []container.Summary{
@@ -142,7 +129,7 @@ func TestResolveTarget_ServicePicksLowestInstance(t *testing.T) {
 
 func TestResolveTarget_ServiceNoRunning(t *testing.T) {
 	cli := &mockDockerClient{
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			return []container.Summary{{ID: "x", State: "exited"}}, nil
 		},
 	}
@@ -170,11 +157,9 @@ func TestResolveTarget_AutoContainerFirst(t *testing.T) {
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
 			return container.InspectResponse{
-				ContainerJSONBase: &container.ContainerJSONBase{
-					ID:    "sha-web",
-					Name:  "/web",
-					State: &container.State{Running: true},
-				},
+				ID:    "sha-web",
+				Name:  "/web",
+				State: &container.State{Running: true},
 			}, nil
 		},
 	}
@@ -195,9 +180,9 @@ func TestResolveTarget_AutoFallsBackToService(t *testing.T) {
 	listCalled := false
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
-			return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
+			return container.InspectResponse{}, fmt.Errorf("no such container: %w", cerrdefs.ErrNotFound)
 		},
-		containerList: func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
 			listCalled = true
 			return []container.Summary{
 				{
@@ -229,7 +214,7 @@ func TestResolveTarget_AutoFallsBackToService(t *testing.T) {
 func TestResolveTarget_AutoNoMatchNoProject(t *testing.T) {
 	cli := &mockDockerClient{
 		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
-			return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
+			return container.InspectResponse{}, fmt.Errorf("no such container: %w", cerrdefs.ErrNotFound)
 		},
 	}
 	_, err := ResolveTarget(context.Background(), ResolveTargetInput{
@@ -238,5 +223,21 @@ func TestResolveTarget_AutoNoMatchNoProject(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when no container and no project available")
+	}
+}
+
+// TestIsNotFound_RecognizesErrdefsWrappedError locks in the migration to
+// github.com/containerd/errdefs: a not-found error carried by the client's
+// errdefs sentinel must be recognized even when its message does not contain
+// the "no such container" string that the fallback path matches on.
+func TestIsNotFound_RecognizesErrdefsWrappedError(t *testing.T) {
+	if !isNotFound(fmt.Errorf("resource missing: %w", cerrdefs.ErrNotFound)) {
+		t.Fatal("expected containerd/errdefs not-found error to be recognized")
+	}
+	if isNotFound(fmt.Errorf("some unrelated failure")) {
+		t.Fatal("unrelated error must not be treated as not-found")
+	}
+	if isNotFound(nil) {
+		t.Fatal("nil error must not be treated as not-found")
 	}
 }
