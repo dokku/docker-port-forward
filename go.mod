@@ -3,7 +3,7 @@ module github.com/dokku/docker-port-forward
 go 1.26.2
 
 require (
-	github.com/compose-spec/compose-go/v2 v2.14.0
+	github.com/compose-spec/compose-go/v2 v2.15.0
 	github.com/josegonzalez/cli-skeleton v0.25.0
 	github.com/mitchellh/cli v1.1.5
 	github.com/opencontainers/image-spec v1.1.1
@@ -11,7 +11,10 @@ require (
 	github.com/spf13/pflag v1.0.10
 )
 
-require github.com/docker/go-connections v0.8.1 // indirect
+require (
+	github.com/docker/go-connections v0.8.1 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
+)
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
@@ -48,7 +51,7 @@ require (
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/sirupsen/logrus v1.10.1 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
