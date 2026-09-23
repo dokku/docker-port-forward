@@ -76,14 +76,40 @@ func FormatAddress(addr string) string {
 	return addr
 }
 
+// AllInterfaces is the bind address that publishes on every IPv4 and IPv6
+// interface, like `docker run -p LOCAL:REMOTE` with no host IP. It maps to
+// the zero HostIP in the helper's port bindings.
+const AllInterfaces = "*"
+
 // ValidateAddress reports whether addr is usable as a bind address: an IP
-// literal or "localhost".
+// literal, "localhost", or AllInterfaces.
 func ValidateAddress(addr string) error {
-	if addr == "localhost" {
-		return nil
+	if !isValidAddress(addr) {
+		return fmt.Errorf("invalid address %q: must be an IP address, \"localhost\" or %q", addr, AllInterfaces)
 	}
-	if _, err := netip.ParseAddr(addr); err != nil {
-		return fmt.Errorf("invalid address %q", addr)
+	return nil
+}
+
+func isValidAddress(addr string) bool {
+	if addr == "localhost" || addr == AllInterfaces {
+		return true
+	}
+	_, err := netip.ParseAddr(addr)
+	return err == nil
+}
+
+// ValidateAddresses checks a list of default bind addresses (--address):
+// every entry must be valid (see ValidateAddress), and AllInterfaces can't be
+// combined with other entries, since the bindings would overlap on the same
+// host port.
+func ValidateAddresses(addrs []string) error {
+	for _, addr := range addrs {
+		if !isValidAddress(addr) {
+			return fmt.Errorf("invalid --address value %q: must be an IP address, \"localhost\" or %q", addr, AllInterfaces)
+		}
+		if addr == AllInterfaces && len(addrs) > 1 {
+			return fmt.Errorf("invalid --address value %q: cannot be combined with other addresses", AllInterfaces)
+		}
 	}
 	return nil
 }
@@ -97,10 +123,13 @@ func ValidateAddress(addr string) error {
 //	"ADDRESS:LOCAL:REMOTE"    -> bind LOCAL on ADDRESS
 //	"ADDRESS::REMOTE"         -> bind an auto-allocated port on ADDRESS
 //	"[IPV6]:LOCAL:REMOTE"     -> IPv6 addresses must be bracketed
+//	":LOCAL:REMOTE"           -> Docker's empty host IP: all interfaces,
+//	                             the same as "*:LOCAL:REMOTE"
 //
 // Any form may end in "/tcp" or "/udp". The protocol suffix is optional and
 // case-insensitive; any other suffix is rejected. ADDRESS must be an IP
-// literal or "localhost". Specs without an address leave Address empty.
+// literal, "localhost" or "*" (AllInterfaces). Specs without an address
+// leave Address empty.
 func ParsePortSpec(spec string) (PortPair, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -155,7 +184,9 @@ func ParsePortSpec(spec string) (PortPair, error) {
 		case 3:
 			address, localStr, remoteStr = parts[0], parts[1], parts[2]
 			if address == "" {
-				return PortPair{}, fmt.Errorf("invalid port spec %q: invalid address %q", orig, address)
+				// An empty host IP publishes on all interfaces, as in
+				// `docker run -p :LOCAL:REMOTE`.
+				address = AllInterfaces
 			}
 		default:
 			return PortPair{}, fmt.Errorf("invalid port spec %q: IPv6 addresses must be enclosed in brackets", orig)

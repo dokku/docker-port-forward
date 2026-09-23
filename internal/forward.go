@@ -104,7 +104,11 @@ type ForwardInput struct {
 	// timeout). Ignored when no UDP pairs are requested. Zero falls back to
 	// DefaultUDPTimeout.
 	UDPTimeout time.Duration
-	Logger     Logger
+	// TCPHalfCloseTimeout is how long each TCP forward waits for the other
+	// side after one side closes its write half (socat -t). Zero keeps
+	// socat's 0.5s default.
+	TCPHalfCloseTimeout time.Duration
+	Logger              Logger
 }
 
 // ForwardResult describes what StartForward produced.
@@ -250,20 +254,21 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		name = autoName(info.Name)
 	}
 	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
-		TargetID:      in.Target.ContainerID,
-		TargetName:    strings.TrimPrefix(info.Name, "/"),
-		TargetNetwork: networkName,
-		TargetAddress: targetAddr,
-		Image:         in.HelperImage,
-		Pairs:         pairs,
-		Addresses:     in.Addresses,
-		Name:          name,
-		Session:       randomHex(8),
-		ExtraLabels:   in.ExtraLabels,
-		Detach:        in.Detach,
-		RestartPolicy: in.RestartPolicy,
-		LogConfig:     in.LogConfig,
-		UDPTimeout:    in.UDPTimeout,
+		TargetID:            in.Target.ContainerID,
+		TargetName:          strings.TrimPrefix(info.Name, "/"),
+		TargetNetwork:       networkName,
+		TargetAddress:       targetAddr,
+		Image:               in.HelperImage,
+		Pairs:               pairs,
+		Addresses:           in.Addresses,
+		Name:                name,
+		Session:             randomHex(8),
+		ExtraLabels:         in.ExtraLabels,
+		Detach:              in.Detach,
+		RestartPolicy:       in.RestartPolicy,
+		LogConfig:           in.LogConfig,
+		UDPTimeout:          in.UDPTimeout,
+		TCPHalfCloseTimeout: in.TCPHalfCloseTimeout,
 	})
 
 	resp, err := in.Client.ContainerCreate(ctx, cfg, hostCfg, &network.NetworkingConfig{}, nil, name)
@@ -321,7 +326,7 @@ func resolveAutoPorts(in []PortPair, defaultAddresses []string) ([]PortPair, err
 		if addrs := PairAddresses(p, defaultAddresses); len(addrs) > 0 {
 			bindAddr = addrs[0]
 		}
-		bind := net.JoinHostPort(bindAddr, "0")
+		bind := net.JoinHostPort(listenHost(bindAddr), "0")
 		var port int
 		switch proto {
 		case ProtocolTCP:
@@ -397,11 +402,7 @@ func preflightHostPorts(defaultAddresses []string, pairs []PortPair) error {
 	for _, p := range pairs {
 		proto := NormalizeProtocol(p.Protocol)
 		for _, addr := range PairAddresses(p, defaultAddresses) {
-			host := addr
-			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-				host = "[" + host + "]"
-			}
-			bind := fmt.Sprintf("%s:%d", host, p.LocalPort)
+			bind := net.JoinHostPort(listenHost(addr), strconv.Itoa(p.LocalPort))
 			var err error
 			switch proto {
 			case ProtocolTCP:
@@ -430,6 +431,17 @@ func preflightHostPorts(defaultAddresses []string, pairs []PortPair) error {
 		}
 	}
 	return nil
+}
+
+// listenHost returns the host part used to bind addr in this process:
+// AllInterfaces becomes "", which Go listens on dual-stack where IPv6 is
+// available (and IPv4 otherwise), matching what the daemon publishes for a
+// zero HostIP.
+func listenHost(addr string) string {
+	if addr == AllInterfaces {
+		return ""
+	}
+	return addr
 }
 
 // portReleaseTimeout bounds how long StartForward waits for a replaced
@@ -540,6 +552,9 @@ type helperConfig struct {
 	RestartPolicy container.RestartPolicy
 	LogConfig     container.LogConfig
 	UDPTimeout    time.Duration
+	// TCPHalfCloseTimeout is socat's -t for TCP forwards. Zero keeps
+	// socat's default.
+	TCPHalfCloseTimeout time.Duration
 }
 
 // buildHelperContainerConfig prepares the Docker Config + HostConfig for the
@@ -575,6 +590,13 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 		udpSeconds = int(DefaultUDPTimeout.Seconds())
 	}
 
+	// socat -t is how long to wait for the other side after one side
+	// closes its write half; unset keeps socat's 0.5s default.
+	halfClose := ""
+	if h.TCPHalfCloseTimeout > 0 {
+		halfClose = "-t " + strconv.FormatFloat(h.TCPHalfCloseTimeout.Seconds(), 'f', -1, 64) + " "
+	}
+
 	var shCmd strings.Builder
 	shCmd.WriteString("trap 'kill 0' EXIT; ")
 	for _, k := range keys {
@@ -583,8 +605,8 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 			fmt.Fprintf(&shCmd, "socat -T %d UDP-LISTEN:%d,fork,reuseaddr UDP:%s:%d & ",
 				udpSeconds, k.remote, h.TargetAddress, k.remote)
 		default:
-			fmt.Fprintf(&shCmd, "socat TCP-LISTEN:%d,fork,reuseaddr TCP:%s:%d & ",
-				k.remote, h.TargetAddress, k.remote)
+			fmt.Fprintf(&shCmd, "socat %sTCP-LISTEN:%d,fork,reuseaddr TCP:%s:%d & ",
+				halfClose, k.remote, h.TargetAddress, k.remote)
 		}
 	}
 	shCmd.WriteString("wait")
@@ -601,8 +623,10 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 		exposed[port] = struct{}{}
 		for _, addr := range PairAddresses(p, h.Addresses) {
 			boundAddresses[addr] = struct{}{}
-			// HostIP is a netip.Addr in the moby API; a non-IP address yields
-			// the zero value, which the daemon treats as "all interfaces".
+			// HostIP is a netip.Addr in the moby API. AllInterfaces yields
+			// the zero value, which the daemon publishes on every IPv4 and
+			// IPv6 interface, like `docker run -p LOCAL:REMOTE`. Other
+			// non-IP values are rejected before this point.
 			hostIP, _ := netip.ParseAddr(addr)
 			bindings[port] = append(bindings[port], network.PortBinding{
 				HostIP:   hostIP,

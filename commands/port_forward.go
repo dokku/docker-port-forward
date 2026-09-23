@@ -19,23 +19,24 @@ import (
 type PortForwardCommand struct {
 	command.Meta
 
-	addresses        []string
-	detach           bool
-	envFiles         []string
-	extraLabels      []string
-	files            []string
-	helperImage      string
-	logDriver        string
-	logOpts          []string
-	name             string
-	profiles         []string
-	projectDirectory string
-	projectName      string
-	pull             string
-	restart          string
-	skipPreflight    bool
-	runningTimeout   time.Duration
-	udpTimeout       time.Duration
+	addresses           []string
+	detach              bool
+	envFiles            []string
+	extraLabels         []string
+	files               []string
+	helperImage         string
+	logDriver           string
+	logOpts             []string
+	name                string
+	profiles            []string
+	projectDirectory    string
+	projectName         string
+	pull                string
+	restart             string
+	skipPreflight       bool
+	tcpHalfCloseTimeout time.Duration
+	runningTimeout      time.Duration
+	udpTimeout          time.Duration
 }
 
 func (c *PortForwardCommand) Name() string {
@@ -65,6 +66,9 @@ func (c *PortForwardCommand) Examples() map[string]string {
 		"Bind all interfaces":                              fmt.Sprintf("%s %s --address 0.0.0.0 my-container 8080:80", appName, c.Name()),
 		"Add extra labels to the helper":                   fmt.Sprintf("%s %s --label team=backend --label env=dev my-container 8080:80", appName, c.Name()),
 		"Bind each port on its own address":                fmt.Sprintf("%s %s my-container 127.0.0.1:8080:80 0.0.0.0:5432:5432", appName, c.Name()),
+		"Bind all interfaces, IPv4 and IPv6":               fmt.Sprintf("%s %s --address '*' my-container 8080:80", appName, c.Name()),
+		"Bind one port on all interfaces":                  fmt.Sprintf("%s %s my-container :8080:80", appName, c.Name()),
+		"Wait for replies after a client half-closes":      fmt.Sprintf("%s %s --detach --tcp-half-close-timeout 100000000s my-container 8080:80", appName, c.Name()),
 		"Forward a privileged port":                        fmt.Sprintf("%s %s --skip-preflight my-container 80:80", appName, c.Name()),
 		"Configure the helper's logging":                   fmt.Sprintf("%s %s --detach --log-driver json-file --log-opt max-size=10m my-container 8080:80", appName, c.Name()),
 		"Forward a UDP port":                               fmt.Sprintf("%s %s my-container 53:53/udp", appName, c.Name()),
@@ -99,7 +103,7 @@ func (c *PortForwardCommand) ParsedArguments(args []string) (map[string]command.
 
 func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f := c.Meta.FlagSet(c.Name(), command.FlagSetClient)
-	f.StringSliceVar(&c.addresses, "address", []string{"localhost"}, "addresses to listen on (comma-separated); may be repeated")
+	f.StringSliceVar(&c.addresses, "address", []string{"localhost"}, "addresses to listen on (comma-separated); may be repeated; \"*\" binds all interfaces (IPv4 and IPv6)")
 	f.BoolVarP(&c.detach, "detach", "d", false, "run the helper container in the background and return immediately")
 	f.DurationVar(&c.runningTimeout, "container-running-timeout", portforward.DefaultRunningTimeout, "how long to wait for the helper container to be running")
 	f.StringSliceVar(&c.envFiles, "env-file", []string{}, "one or more paths to environment files (for compose interpolation)")
@@ -115,6 +119,7 @@ func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f.StringVar(&c.pull, "pull", portforward.PullMissing, "pull policy for the helper image (always, missing, never)")
 	f.BoolVar(&c.skipPreflight, "skip-preflight", false, "skip checking that host ports are free before creating the helper; needed for ports below 1024 when not running as root")
 	f.StringVar(&c.restart, "restart", "", "Restart policy to apply when a container exits (default \"unless-stopped\" with --detach, \"no\" otherwise)")
+	f.DurationVar(&c.tcpHalfCloseTimeout, "tcp-half-close-timeout", 0, "how long each TCP forward waits for the other side after one side closes its write half (socat -t); 0 keeps socat's 0.5s default")
 	f.DurationVar(&c.udpTimeout, "udp-timeout", portforward.DefaultUDPTimeout, "idle timeout applied to each UDP forward (socat -T)")
 	return f
 }
@@ -139,6 +144,7 @@ func (c *PortForwardCommand) AutocompleteFlags() complete.Flags {
 			"--pull":                      complete.PredictSet("always", "missing", "never"),
 			"--restart":                   complete.PredictSet("no", "always", "unless-stopped", "on-failure"),
 			"--skip-preflight":            complete.PredictNothing,
+			"--tcp-half-close-timeout":    complete.PredictAnything,
 			"--udp-timeout":               complete.PredictAnything,
 		},
 	)
@@ -176,26 +182,27 @@ func (c *PortForwardCommand) Run(args []string) int {
 	defer cancel()
 
 	_, err = portforward.Forward(ctx, portforward.Options{
-		Target:           rest[0],
-		Ports:            rest[1:],
-		Addresses:        c.addresses,
-		Detach:           c.detach,
-		RestartPolicy:    c.restart,
-		RunningTimeout:   c.runningTimeout,
-		EnvFiles:         c.envFiles,
-		Files:            c.files,
-		HelperImage:      c.helperImage,
-		Labels:           extraLabels,
-		LogDriver:        c.logDriver,
-		LogOpts:          parseLogOptFlags(c.logOpts),
-		Name:             c.name,
-		Profiles:         c.profiles,
-		ProjectDirectory: c.projectDirectory,
-		ProjectName:      c.projectName,
-		Pull:             c.pull,
-		SkipPreflight:    c.skipPreflight,
-		UDPTimeout:       c.udpTimeout,
-		Logger:           logger,
+		Target:              rest[0],
+		Ports:               rest[1:],
+		Addresses:           c.addresses,
+		Detach:              c.detach,
+		RestartPolicy:       c.restart,
+		RunningTimeout:      c.runningTimeout,
+		EnvFiles:            c.envFiles,
+		Files:               c.files,
+		HelperImage:         c.helperImage,
+		Labels:              extraLabels,
+		LogDriver:           c.logDriver,
+		LogOpts:             parseLogOptFlags(c.logOpts),
+		Name:                c.name,
+		Profiles:            c.profiles,
+		ProjectDirectory:    c.projectDirectory,
+		ProjectName:         c.projectName,
+		Pull:                c.pull,
+		SkipPreflight:       c.skipPreflight,
+		TCPHalfCloseTimeout: c.tcpHalfCloseTimeout,
+		UDPTimeout:          c.udpTimeout,
+		Logger:              logger,
 	})
 	if err != nil {
 		c.Ui.Error(err.Error())

@@ -22,12 +22,16 @@ type Options struct {
 	Target string
 	// Ports are the port spec arguments, in `docker run -p` form:
 	// [[ADDRESS:]LOCAL_PORT:]REMOTE_PORT[/udp]. ADDRESS is an IP literal
-	// (IPv6 in brackets) or "localhost" and binds that port only there;
-	// ADDRESS::REMOTE_PORT auto-allocates the local port. When empty,
-	// listening ports are detected in the target.
+	// (IPv6 in brackets), "localhost", or AllInterfaces ("*"), and binds
+	// that port only there; an empty ADDRESS (":LOCAL:REMOTE") means
+	// AllInterfaces, as in Docker. ADDRESS::REMOTE_PORT auto-allocates the
+	// local port. When empty, listening ports are detected in the target.
 	Ports []string
 	// Addresses mirrors --address: the addresses to bind ports whose spec
-	// has no ADDRESS. Defaults to ["localhost"].
+	// has no ADDRESS. Each entry is an IP literal, "localhost" (127.0.0.1
+	// and ::1), or AllInterfaces ("*": every IPv4 and IPv6 interface, which
+	// can't be combined with other entries). "0.0.0.0" binds IPv4 only.
+	// Defaults to ["localhost"].
 	Addresses []string
 	// Detach mirrors --detach. When true, Forward returns once the helper
 	// is running and the helper keeps running until removed with Cleanup.
@@ -79,6 +83,10 @@ type Options struct {
 	SkipPreflight bool
 	// UDPTimeout mirrors --udp-timeout. Defaults to DefaultUDPTimeout.
 	UDPTimeout time.Duration
+	// TCPHalfCloseTimeout mirrors --tcp-half-close-timeout: how long each
+	// TCP forward waits for the other side after one side closes its write
+	// half (socat -t). Zero keeps socat's 0.5s default.
+	TCPHalfCloseTimeout time.Duration
 	// Client is the Docker client to use. When nil, a client is created
 	// from the environment (DOCKER_HOST etc.) and closed before returning.
 	// A caller-supplied client is never closed.
@@ -139,6 +147,14 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 
 	if err := internal.ValidateLogConfig(opts.LogDriver, opts.LogOpts); err != nil {
 		return Result{}, err
+	}
+
+	if err := internal.ValidateAddresses(opts.Addresses); err != nil {
+		return Result{}, err
+	}
+
+	if opts.TCPHalfCloseTimeout < 0 {
+		return Result{}, fmt.Errorf("invalid --tcp-half-close-timeout value %q: must not be negative", opts.TCPHalfCloseTimeout.String())
 	}
 
 	parsedTarget, err := internal.ParseTarget(opts.Target)
@@ -204,7 +220,9 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 		ExtraLabels:    opts.Labels,
 		SkipPreflight:  opts.SkipPreflight,
 		UDPTimeout:     opts.UDPTimeout,
-		Logger:         logger,
+
+		TCPHalfCloseTimeout: opts.TCPHalfCloseTimeout,
+		Logger:              logger,
 	})
 	if err != nil {
 		return Result{}, err

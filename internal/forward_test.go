@@ -1258,3 +1258,97 @@ func TestStartForward_SkipPreflightRetriesStartAfterReplacingStaleHelper(t *test
 		t.Fatalf("expected replacement with one retried start (removed=%v startCalls=%d result=%+v)", removed, startCalls, result)
 	}
 }
+
+func TestBuildHelperContainerConfig_AllInterfaces(t *testing.T) {
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs:         []PortPair{{Address: AllInterfaces, LocalPort: 8080, RemotePort: 80}},
+		Addresses:     []string{"localhost"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+	})
+	for port, bindings := range hostCfg.PortBindings {
+		if len(bindings) != 1 || bindings[0].HostIP.IsValid() || bindings[0].HostPort != "8080" {
+			t.Fatalf("expected one zero-HostIP binding for %s, got %+v", port, bindings)
+		}
+	}
+	if cfg.Labels[LabelAddresses] != "*" {
+		t.Fatalf("unexpected addresses label: %q", cfg.Labels[LabelAddresses])
+	}
+	if cfg.Labels[LabelBindings] != "*:8080:80" {
+		t.Fatalf("unexpected bindings label: %q", cfg.Labels[LabelBindings])
+	}
+}
+
+func TestPreflightHostPorts_AllInterfacesDetectsConflict(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	if err := preflightHostPorts(nil, []PortPair{{Address: AllInterfaces, LocalPort: port, RemotePort: 80}}); err == nil {
+		t.Fatal("expected conflict on all interfaces")
+	}
+	if err := preflightHostPorts([]string{AllInterfaces}, []PortPair{{LocalPort: freeTCPPort(t), RemotePort: 80}}); err != nil {
+		t.Fatalf("unexpected error for a free port: %v", err)
+	}
+}
+
+func TestResolveAutoPorts_AllInterfaces(t *testing.T) {
+	pairs, err := resolveAutoPorts([]PortPair{
+		{Address: AllInterfaces, RemotePort: 80},
+		{RemotePort: 53, Protocol: ProtocolUDP},
+	}, []string{AllInterfaces})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range pairs {
+		if p.LocalPort == 0 {
+			t.Fatalf("expected an allocated port: %+v", p)
+		}
+	}
+}
+
+func TestBuildHelperContainerConfig_TCPHalfCloseTimeout(t *testing.T) {
+	build := func(d time.Duration) string {
+		cfg, _ := buildHelperContainerConfig(helperConfig{
+			TargetID:      "tgt",
+			TargetNetwork: "bridge",
+			TargetAddress: "172.17.0.5",
+			Image:         "alpine/socat",
+			Pairs: []PortPair{
+				{LocalPort: 8080, RemotePort: 80},
+				{LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+			},
+			Addresses:           []string{"127.0.0.1"},
+			Name:                "name",
+			Session:             "sess",
+			Detach:              true,
+			RestartPolicy:       container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+			UDPTimeout:          DefaultUDPTimeout,
+			TCPHalfCloseTimeout: d,
+		})
+		return cfg.Cmd[0]
+	}
+
+	shCmd := build(100000000 * time.Second)
+	if !strings.Contains(shCmd, "socat -t 100000000 TCP-LISTEN:80,fork,reuseaddr TCP:172.17.0.5:80") {
+		t.Fatalf("expected -t on the TCP socat: %s", shCmd)
+	}
+	if !strings.Contains(shCmd, "socat -T 60 UDP-LISTEN:53") {
+		t.Fatalf("UDP socat should be unchanged: %s", shCmd)
+	}
+	if shCmd := build(1500 * time.Millisecond); !strings.Contains(shCmd, "socat -t 1.5 TCP-LISTEN:80") {
+		t.Fatalf("expected fractional -t: %s", shCmd)
+	}
+	if shCmd := build(0); strings.Contains(shCmd, " -t ") {
+		t.Fatalf("expected no -t when unset: %s", shCmd)
+	}
+}

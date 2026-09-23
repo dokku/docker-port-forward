@@ -55,7 +55,7 @@ func main() {
 
 ## Per-port addresses and logging
 
-`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`. `SkipPreflight`, like `--skip-preflight`, skips the host-port check so ports below 1024 can be forwarded when the program isn't running as root.
+`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. Use `portforward.AllInterfaces` (`"*"`) in `Addresses`, or a `*:LOCAL:REMOTE` / `:LOCAL:REMOTE` spec, to publish on every IPv4 and IPv6 interface like `docker run -p LOCAL:REMOTE`; `0.0.0.0` binds IPv4 only. `TCPHalfCloseTimeout` sets socat's `-t` for TCP forwards, like `--tcp-half-close-timeout`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`. `SkipPreflight`, like `--skip-preflight`, skips the host-port check so ports below 1024 can be forwarded when the program isn't running as root.
 
 ```go
 result, err := portforward.Forward(ctx, portforward.Options{
@@ -125,6 +125,20 @@ fmt.Printf("removed %d of %d helpers\n", result.Removed, len(result.Helpers))
 ```
 
 Removal failures for individual helpers are passed to the `Logger` and reflected in `Removed`; they are not returned as an error.
+
+When `Name` refers to a container that exists but isn't a port-forward helper, `List` and `Cleanup` return an error that matches `portforward.ErrNotHelper`. A failed lookup wraps the Docker client's error instead, so it can be checked with `cerrdefs.IsNotFound` from `github.com/containerd/errdefs`:
+
+```go
+_, err := portforward.List(ctx, portforward.ListOptions{Name: "my-ambassador"})
+switch {
+case errors.Is(err, portforward.ErrNotHelper):
+    // a container that wasn't created by docker-port-forward
+case cerrdefs.IsNotFound(err):
+    // no such container
+case err != nil:
+    log.Fatal(err)
+}
+```
 
 ## Using your own Docker client
 

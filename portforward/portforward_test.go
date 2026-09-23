@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dokku/docker-port-forward/internal"
 	"github.com/moby/moby/api/types/container"
@@ -480,7 +481,7 @@ func TestForward_InvalidSpecAddress(t *testing.T) {
 		Ports:  []string{"example.com:8080:80"},
 		Client: fake,
 	})
-	if err == nil || err.Error() != `invalid port spec "example.com:8080:80": invalid address "example.com"` {
+	if err == nil || err.Error() != `invalid port spec "example.com:8080:80": invalid address "example.com": must be an IP address, "localhost" or "*"` {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -588,5 +589,106 @@ func TestForward_SkipPreflightAllowsBusyPort(t *testing.T) {
 	}
 	if len(fake.created) != 1 {
 		t.Fatalf("expected one helper to be created, got %d", len(fake.created))
+	}
+}
+
+func TestForward_AllInterfaces(t *testing.T) {
+	fake := newTargetClient()
+	result, err := Forward(context.Background(), Options{
+		Target:    "web",
+		Ports:     []string{":80", ":8080:8080"},
+		Addresses: []string{AllInterfaces},
+		Detach:    true,
+		Client:    fake,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for port, bindings := range fake.created[0].HostConfig.PortBindings {
+		if len(bindings) != 1 || bindings[0].HostIP.IsValid() {
+			t.Fatalf("expected one zero-HostIP binding for %s, got %+v", port, bindings)
+		}
+	}
+	for _, p := range result.Ports {
+		if len(p.Addresses) != 1 || p.Addresses[0] != AllInterfaces {
+			t.Fatalf("unexpected addresses: %+v", p)
+		}
+	}
+}
+
+func TestForward_AddressAndHalfCloseValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		opts    Options
+		wantErr string
+	}{
+		{
+			name:    "hostname address",
+			opts:    Options{Target: "web", Ports: []string{"80"}, Addresses: []string{"example.com"}},
+			wantErr: `invalid --address value "example.com": must be an IP address, "localhost" or "*"`,
+		},
+		{
+			name:    "all interfaces combined",
+			opts:    Options{Target: "web", Ports: []string{"80"}, Addresses: []string{AllInterfaces, "127.0.0.1"}},
+			wantErr: `invalid --address value "*": cannot be combined with other addresses`,
+		},
+		{
+			name:    "negative half-close timeout",
+			opts:    Options{Target: "web", Ports: []string{"80"}, TCPHalfCloseTimeout: -time.Second},
+			wantErr: `invalid --tcp-half-close-timeout value "-1s": must not be negative`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newTargetClient()
+			tc.opts.Client = fake
+			_, err := Forward(context.Background(), tc.opts)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("got error %v, want %q", err, tc.wantErr)
+			}
+			if fake.calls != 0 {
+				t.Fatalf("expected no Docker calls, got %d", fake.calls)
+			}
+		})
+	}
+}
+
+func TestForward_TCPHalfCloseTimeoutReachesHelper(t *testing.T) {
+	fake := newTargetClient()
+	_, err := Forward(context.Background(), Options{
+		Target:              "web",
+		Ports:               []string{":80"},
+		Addresses:           []string{"127.0.0.1"},
+		Detach:              true,
+		TCPHalfCloseTimeout: 100000000 * time.Second,
+		Client:              fake,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd := fake.created[0].Config.Cmd[0]; !strings.Contains(cmd, "socat -t 100000000 TCP-LISTEN:80") {
+		t.Fatalf("expected -t in helper command: %s", cmd)
+	}
+}
+
+func TestNotHelperIsSentinel(t *testing.T) {
+	newFake := func() *fakeClient {
+		return &fakeClient{containers: map[string]container.InspectResponse{
+			"other": {ID: "other-id", Name: "/other", Config: &container.Config{}},
+		}}
+	}
+
+	_, err := List(context.Background(), ListOptions{Name: "other", Client: newFake()})
+	if !errors.Is(err, ErrNotHelper) || err.Error() != `container "other" is not a port-forward helper` {
+		t.Fatalf("List: unexpected error %v", err)
+	}
+	_, err = Cleanup(context.Background(), CleanupOptions{Name: "other", Client: newFake()})
+	if !errors.Is(err, ErrNotHelper) {
+		t.Fatalf("Cleanup: unexpected error %v", err)
+	}
+
+	_, err = List(context.Background(), ListOptions{Name: "missing", Client: newFake()})
+	if err == nil || errors.Is(err, ErrNotHelper) {
+		t.Fatalf("a failed lookup must not match ErrNotHelper: %v", err)
 	}
 }

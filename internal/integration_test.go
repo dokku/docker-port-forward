@@ -946,3 +946,38 @@ func TestIntegration_PerPortAddresses(t *testing.T) {
 	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", result.Pairs[0].LocalPort), 10*time.Second)
 	resp.Body.Close()
 }
+
+// ---------------------------------------------------------------------------
+// All-interface binds
+// ---------------------------------------------------------------------------
+
+func TestIntegration_AllInterfacesBinding(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+	targetID := startNginxTarget(t, ctx, cli)
+
+	result, err := StartForward(ctx, ForwardInput{
+		Client:      cli,
+		Target:      ResolvedTarget{ContainerID: targetID, ContainerName: "nginx"},
+		Pairs:       []PortPair{{Address: AllInterfaces, LocalPort: 0, RemotePort: 80}},
+		Addresses:   []string{"localhost"},
+		Detach:      true,
+		ExtraLabels: map[string]string{"dpf-integration": "true"},
+		Logger:      &testLogger{t: t},
+	})
+	if err != nil {
+		t.Fatalf("StartForward returned error: %v", err)
+	}
+
+	helper, err := cli.ContainerInspect(ctx, result.HelperID)
+	if err != nil {
+		t.Fatalf("failed to inspect helper: %v", err)
+	}
+	for port, bindings := range helper.HostConfig.PortBindings {
+		if len(bindings) != 1 || bindings[0].HostIP.IsValid() {
+			t.Fatalf("expected one zero-HostIP binding for %s, got %+v", port, bindings)
+		}
+	}
+
+	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", result.Pairs[0].LocalPort), 10*time.Second)
+	resp.Body.Close()
+}

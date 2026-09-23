@@ -20,6 +20,12 @@ const (
 	DefaultUDPTimeout = internal.DefaultUDPTimeout
 )
 
+// AllInterfaces ("*") is the address that publishes a port on every IPv4
+// and IPv6 interface, like `docker run -p LOCAL:REMOTE` with no host IP. Use
+// it in Options.Addresses or as the ADDRESS of a port spec
+// ("*:LOCAL:REMOTE", or Docker's ":LOCAL:REMOTE").
+const AllInterfaces = internal.AllInterfaces
+
 // Pull policies accepted by Options.Pull.
 const (
 	PullAlways  = internal.PullAlways  // "always"

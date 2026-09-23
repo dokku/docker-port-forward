@@ -2,6 +2,7 @@ package portforward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,11 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
+
+// ErrNotHelper is returned (wrapped) by List and Cleanup when Name refers to
+// an existing container that isn't a port-forward helper. Check it with
+// errors.Is.
+var ErrNotHelper = errors.New("not a port-forward helper")
 
 // ListOptions mirrors the flags of `docker port-forward list`.
 type ListOptions struct {
@@ -74,10 +80,10 @@ func findHelpers(ctx context.Context, cli internal.DockerClientInterface, name, 
 	if name != "" {
 		info, err := cli.ContainerInspect(ctx, name)
 		if err != nil {
-			return nil, fmt.Errorf("error looking up helper %q: %v", name, err)
+			return nil, fmt.Errorf("error looking up helper %q: %w", name, err)
 		}
 		if info.Config == nil || info.Config.Labels[internal.LabelPortForward] != "true" {
-			return nil, fmt.Errorf("container %q is not a port-forward helper", name)
+			return nil, fmt.Errorf("container %q is %w", name, ErrNotHelper)
 		}
 		state := ""
 		if info.State != nil {

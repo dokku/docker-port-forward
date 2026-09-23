@@ -41,7 +41,7 @@ Targets that share another container's netns work, but the helper attaches to wh
 
 Macvlan and ipvlan networks often do not permit the Docker host itself to reach containers attached to them (this is a well-known Linux kernel limitation: the host cannot speak to macvlan endpoints on the same physical interface). The helper typically *is* reachable because it is placed on the same macvlan network, but the host's `-p` publish entry ends up bound to a virtual interface the host kernel can't route back to. If the published port works from the LAN but not from the Docker host itself, this is why.
 
-**Workaround:** add a secondary plain `bridge` network to the target (`docker network connect bridge <target>`) and let `docker-port-forward` pick that one (it prefers user-defined networks; add `--address 0.0.0.0` if you need LAN reach).
+**Workaround:** add a secondary plain `bridge` network to the target (`docker network connect bridge <target>`) and let `docker-port-forward` pick that one (it prefers user-defined networks; add `--address 0.0.0.0` (IPv4) or `--address '*'` (IPv4 and IPv6) if you need LAN reach).
 
 ### Swarm overlay networks
 
@@ -134,7 +134,7 @@ This doesn't help with rootless Docker, whose daemon can't bind ports below 1024
 - **Only detached helpers are restarted:** detached helpers use the `unless-stopped` restart policy by default (configurable with `--restart`), so Docker restarts them after a crash or daemon restart. Attached helpers are auto-removed and never restarted; if one dies, re-run the command.
 - **Target IP changes on the default `bridge` network:** on a user-defined network the helper reaches the target by container name, so a target restart that changes its IP is handled. On the default `bridge` network there is no embedded DNS, so the helper dials the target's IP and stops working if the target comes back with a different IP. The helper records that IP in its labels, `docker port-forward list --stale` reports it, and re-running the same `docker port-forward --detach` command replaces it. Nothing replaces it automatically in the background.
 - **Recreated targets:** if the target is recreated rather than restarted (for example `docker compose up` after a config change), a helper on a user-defined network keeps forwarding to the new container by name. Its `com.dokku.port-forward.target` label still holds the old container ID, though, so `docker port-forward cleanup --target <new>` won't match it. Use `cleanup --name <helper>` or plain `cleanup` instead. On the default `bridge` network the helper is stale; re-running the forward removes it if it holds a requested host port.
-- **Per-port addresses must be IP literals:** the `ADDRESS` in an `ADDRESS:LOCAL:REMOTE` port spec must be an IP address (IPv6 in brackets) or `localhost`. Hostnames are rejected.
+- **Bind addresses must be IP literals:** the `ADDRESS` in an `ADDRESS:LOCAL:REMOTE` port spec and each `--address` value must be an IP address (IPv6 in brackets in port specs), `localhost`, or `*` for every interface. Hostnames are rejected.
 - **No TLS termination:** traffic is proxied raw. If the target serves TLS, clients should connect using its TLS settings; the helper does no re-encoding.
 
 ## Reporting new limitations

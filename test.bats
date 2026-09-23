@@ -216,6 +216,7 @@ teardown() {
   assert_output_contains "--log-driver"
   assert_output_contains "--log-opt"
   assert_output_contains "--skip-preflight"
+  assert_output_contains "--tcp-half-close-timeout"
   assert_output_contains "<target>"
   assert_output_contains "ports..."
 }
@@ -280,6 +281,24 @@ teardown() {
   run "$DOCKER_PORT_FORWARD" port-forward container/foo ::1:8080:80
   assert_failure
   assert_output_contains "IPv6 addresses must be enclosed in brackets"
+}
+
+@test "smoke: port-forward rejects a hostname in --address" {
+  run "$DOCKER_PORT_FORWARD" port-forward --address example.com container/foo 8080:80
+  assert_failure
+  assert_output_contains 'invalid --address value "example.com": must be an IP address, "localhost" or "*"'
+}
+
+@test "smoke: port-forward rejects --address '*' combined with other addresses" {
+  run "$DOCKER_PORT_FORWARD" port-forward --address '*' --address 127.0.0.1 container/foo 8080:80
+  assert_failure
+  assert_output_contains 'invalid --address value "*": cannot be combined with other addresses'
+}
+
+@test "smoke: port-forward rejects a negative --tcp-half-close-timeout" {
+  run "$DOCKER_PORT_FORWARD" port-forward --tcp-half-close-timeout -1s container/foo 8080:80
+  assert_failure
+  assert_output_contains 'invalid --tcp-half-close-timeout value "-1s": must not be negative'
 }
 
 @test "smoke: port-forward rejects invalid --label format" {
@@ -450,6 +469,78 @@ teardown() {
 
   if ! wait_http "http://127.0.0.1:${LOW}/" 10; then
     flunk "curl to forwarded port ${LOW} never succeeded"
+  fi
+}
+
+@test "integration: empty host IP spec binds all interfaces" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-allif-spec-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" ":$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{len (index .HostConfig.PortBindings "80/tcp")}} {{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}|' "$NAME"
+  assert_success
+  assert_output "1 |"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
+  fi
+}
+
+@test "integration: --address '*' binds all interfaces" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-allif-flag-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --address '*' \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{len (index .HostConfig.PortBindings "80/tcp")}} {{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}|' "$NAME"
+  assert_success
+  assert_output "1 |"
+
+  run docker inspect -f '{{index .Config.Labels "com.dokku.port-forward.addresses"}}' "$NAME"
+  assert_success
+  assert_output "*"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
+  fi
+}
+
+@test "integration: --tcp-half-close-timeout sets socat -t on TCP forwards" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-halfclose-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --tcp-half-close-timeout 100000000s \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{index .Config.Cmd 0}}' "$NAME"
+  assert_success
+  assert_output_contains "socat -t 100000000 TCP-LISTEN:80"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
   fi
 }
 
