@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -1096,5 +1097,164 @@ func TestStartForward_PreflightFailsOnBusyPort(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not available") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStartForward_SkipPreflightAllowsBusyPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	busyPort := l.Addr().(*net.TCPAddr).Port
+
+	created, started := false, false
+	cli := &mockDockerClient{
+		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
+			return newInspectResponseForNetwork(id), nil
+		},
+		containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {
+			created = true
+			return container.CreateResponse{ID: "new-helper"}, nil
+		},
+		containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+			started = true
+			return nil
+		},
+	}
+
+	_, err = StartForward(context.Background(), ForwardInput{
+		Client:        cli,
+		Target:        ResolvedTarget{ContainerID: "target-sha"},
+		Pairs:         []PortPair{{LocalPort: busyPort, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Detach:        true,
+		SkipPreflight: true,
+		Logger:        &captureLogger{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("expected helper created and started (created=%v started=%v)", created, started)
+	}
+}
+
+func TestStartWithPortRetry(t *testing.T) {
+	allocated := errors.New("Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:80 failed: port is already allocated")
+
+	t.Run("retries port conflicts until success", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				if calls < 3 {
+					return allocated
+				}
+				return nil
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 5*time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if calls != 3 {
+			t.Fatalf("expected 3 start attempts, got %d", calls)
+		}
+	})
+
+	t.Run("no retry when disabled", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				return allocated
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", false, 5*time.Second); err == nil {
+			t.Fatal("expected error")
+		}
+		if calls != 1 {
+			t.Fatalf("expected 1 start attempt, got %d", calls)
+		}
+	})
+
+	t.Run("no retry for unrelated errors", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				return errors.New("no such image")
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 5*time.Second); err == nil {
+			t.Fatal("expected error")
+		}
+		if calls != 1 {
+			t.Fatalf("expected 1 start attempt, got %d", calls)
+		}
+	})
+
+	t.Run("gives up at the deadline", func(t *testing.T) {
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				return errors.New("listen tcp4 0.0.0.0:80: bind: address already in use")
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 300*time.Millisecond); err == nil {
+			t.Fatal("expected error after timeout")
+		}
+	})
+}
+
+func TestStartForward_SkipPreflightRetriesStartAfterReplacingStaleHelper(t *testing.T) {
+	port := freeTCPPort(t)
+	stale := helperFor("bridge", "172.17.0.9")
+	stale.Labels[LabelPorts] = fmt.Sprintf("%d:80", port)
+
+	removed := map[string]bool{}
+	startCalls := 0
+	cli := &mockDockerClient{
+		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
+			if id == "target-sha" {
+				return targetOn("bridge", "172.17.0.5", true), nil
+			}
+			return container.InspectResponse{ID: id, State: &container.State{Running: true}}, nil
+		},
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+			if removed[stale.ID] {
+				return nil, nil
+			}
+			return []container.Summary{stale}, nil
+		},
+		containerRemove: func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
+			removed[id] = true
+			return nil
+		},
+		containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "new-helper"}, nil
+		},
+		containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+			startCalls++
+			if startCalls == 1 {
+				return errors.New("port is already allocated")
+			}
+			return nil
+		},
+	}
+
+	result, err := StartForward(context.Background(), ForwardInput{
+		Client:        cli,
+		Target:        ResolvedTarget{ContainerID: "target-sha", ContainerName: "target"},
+		Pairs:         []PortPair{{LocalPort: port, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Detach:        true,
+		SkipPreflight: true,
+		Logger:        &captureLogger{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed[stale.ID] || startCalls != 2 || result.HelperID != "new-helper" {
+		t.Fatalf("expected replacement with one retried start (removed=%v startCalls=%d result=%+v)", removed, startCalls, result)
 	}
 }

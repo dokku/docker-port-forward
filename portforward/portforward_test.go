@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -560,5 +561,32 @@ func TestCleanup_StaleOnlyRemovesStale(t *testing.T) {
 	}
 	if result.Removed != 1 || len(fake.removed) != 1 || fake.removed[0] != "h2-id" {
 		t.Fatalf("expected only h2 removed, got result=%+v removed=%v", result, fake.removed)
+	}
+}
+
+func TestForward_SkipPreflightAllowsBusyPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	busy := fmt.Sprintf("127.0.0.1:%d:80", l.Addr().(*net.TCPAddr).Port)
+
+	// Without SkipPreflight the busy port is rejected before any helper is
+	// created.
+	fake := newTargetClient()
+	if _, err := Forward(context.Background(), Options{Target: "web", Ports: []string{busy}, Detach: true, Client: fake}); err == nil || !strings.Contains(err.Error(), "is not available") {
+		t.Fatalf("expected preflight error, got %v", err)
+	}
+	if len(fake.created) != 0 {
+		t.Fatal("no helper should be created when preflight fails")
+	}
+
+	fake = newTargetClient()
+	if _, err := Forward(context.Background(), Options{Target: "web", Ports: []string{busy}, Detach: true, SkipPreflight: true, Client: fake}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.created) != 1 {
+		t.Fatalf("expected one helper to be created, got %d", len(fake.created))
 	}
 }

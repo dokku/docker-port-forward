@@ -215,6 +215,7 @@ teardown() {
   assert_output_contains "--restart"
   assert_output_contains "--log-driver"
   assert_output_contains "--log-opt"
+  assert_output_contains "--skip-preflight"
   assert_output_contains "<target>"
   assert_output_contains "ports..."
 }
@@ -424,6 +425,32 @@ teardown() {
   run docker inspect -f '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}}' "$NAME"
   assert_success
   assert_output "json-file 1m"
+}
+
+@test "integration: --skip-preflight forwards a port below 1024" {
+  require_docker
+  start_nginx_target
+  LOW=987
+  NAME="dpf-bats-lowport-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --skip-preflight \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "127.0.0.1:$LOW:80"
+  if [[ "$output" == *"port is already allocated"* || "$output" == *"address already in use"* ]]; then
+    skip "host port $LOW is already in use"
+  fi
+  assert_success
+
+  run docker inspect -f '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostPort}}' "$NAME"
+  assert_success
+  assert_output "$LOW"
+
+  if ! wait_http "http://127.0.0.1:${LOW}/" 10; then
+    flunk "curl to forwarded port ${LOW} never succeeded"
+  fi
 }
 
 @test "integration: per-port addresses bind each port on its own address" {

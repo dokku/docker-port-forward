@@ -33,6 +33,7 @@ type PortForwardCommand struct {
 	projectName      string
 	pull             string
 	restart          string
+	skipPreflight    bool
 	runningTimeout   time.Duration
 	udpTimeout       time.Duration
 }
@@ -64,6 +65,7 @@ func (c *PortForwardCommand) Examples() map[string]string {
 		"Bind all interfaces":                              fmt.Sprintf("%s %s --address 0.0.0.0 my-container 8080:80", appName, c.Name()),
 		"Add extra labels to the helper":                   fmt.Sprintf("%s %s --label team=backend --label env=dev my-container 8080:80", appName, c.Name()),
 		"Bind each port on its own address":                fmt.Sprintf("%s %s my-container 127.0.0.1:8080:80 0.0.0.0:5432:5432", appName, c.Name()),
+		"Forward a privileged port":                        fmt.Sprintf("%s %s --skip-preflight my-container 80:80", appName, c.Name()),
 		"Configure the helper's logging":                   fmt.Sprintf("%s %s --detach --log-driver json-file --log-opt max-size=10m my-container 8080:80", appName, c.Name()),
 		"Forward a UDP port":                               fmt.Sprintf("%s %s my-container 53:53/udp", appName, c.Name()),
 		"Mix TCP and UDP in one command":                   fmt.Sprintf("%s %s my-container 8080:80 53:53/udp", appName, c.Name()),
@@ -111,6 +113,7 @@ func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f.StringVar(&c.projectDirectory, "project-directory", "", "the path to the compose project directory")
 	f.StringVarP(&c.projectName, "project-name", "p", "", "the compose project name")
 	f.StringVar(&c.pull, "pull", portforward.PullMissing, "pull policy for the helper image (always, missing, never)")
+	f.BoolVar(&c.skipPreflight, "skip-preflight", false, "skip checking that host ports are free before creating the helper; needed for ports below 1024 when not running as root")
 	f.StringVar(&c.restart, "restart", "", "Restart policy to apply when a container exits (default \"unless-stopped\" with --detach, \"no\" otherwise)")
 	f.DurationVar(&c.udpTimeout, "udp-timeout", portforward.DefaultUDPTimeout, "idle timeout applied to each UDP forward (socat -T)")
 	return f
@@ -135,6 +138,7 @@ func (c *PortForwardCommand) AutocompleteFlags() complete.Flags {
 			"--project-name":              complete.PredictAnything,
 			"--pull":                      complete.PredictSet("always", "missing", "never"),
 			"--restart":                   complete.PredictSet("no", "always", "unless-stopped", "on-failure"),
+			"--skip-preflight":            complete.PredictNothing,
 			"--udp-timeout":               complete.PredictAnything,
 		},
 	)
@@ -189,6 +193,7 @@ func (c *PortForwardCommand) Run(args []string) int {
 		ProjectDirectory: c.projectDirectory,
 		ProjectName:      c.projectName,
 		Pull:             c.pull,
+		SkipPreflight:    c.skipPreflight,
 		UDPTimeout:       c.udpTimeout,
 		Logger:           logger,
 	})

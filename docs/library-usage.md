@@ -55,7 +55,7 @@ func main() {
 
 ## Per-port addresses and logging
 
-`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`.
+`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`. `SkipPreflight`, like `--skip-preflight`, skips the host-port check so ports below 1024 can be forwarded when the program isn't running as root.
 
 ```go
 result, err := portforward.Forward(ctx, portforward.Options{

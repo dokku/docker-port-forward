@@ -72,6 +72,11 @@ type Options struct {
 	ProjectName string
 	// Pull mirrors --pull. Defaults to PullMissing.
 	Pull string
+	// SkipPreflight mirrors --skip-preflight: don't check that host ports
+	// are free before creating the helper. Needed for ports below 1024 when
+	// not running as root; a conflict then surfaces as Docker's publish
+	// error.
+	SkipPreflight bool
 	// UDPTimeout mirrors --udp-timeout. Defaults to DefaultUDPTimeout.
 	UDPTimeout time.Duration
 	// Client is the Docker client to use. When nil, a client is created
@@ -197,6 +202,7 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 		LogConfig:      container.LogConfig{Type: opts.LogDriver, Config: opts.LogOpts},
 		Name:           opts.Name,
 		ExtraLabels:    opts.Labels,
+		SkipPreflight:  opts.SkipPreflight,
 		UDPTimeout:     opts.UDPTimeout,
 		Logger:         logger,
 	})

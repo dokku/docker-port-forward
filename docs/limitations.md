@@ -112,7 +112,13 @@ Publishing a port below 1024 requires the daemon's user to be privileged. Docker
 host port 127.0.0.1:80 is not available: listen tcp 127.0.0.1:80: bind: permission denied
 ```
 
-Use a non-privileged host port (`--address 0.0.0.0 80:80` still requires daemon root, but `8080:80` works universally).
+Pass `--skip-preflight` to skip the check and let the daemon publish the port:
+
+```bash
+docker port-forward --skip-preflight my-container 127.0.0.1:80:80
+```
+
+This doesn't help with rootless Docker, whose daemon can't bind ports below 1024 either. Without the check, the default `localhost` addresses are also published on `::1`, which fails on hosts without IPv6; use `--address 127.0.0.1` or `127.0.0.1:` port specs there. Alternatively, use a non-privileged host port (`8080:80`).
 
 ## Auto-detection caveats
 

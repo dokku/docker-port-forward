@@ -64,6 +64,7 @@ Multiple port specs may be provided. If no port specs are given, the command pro
 | `-p, --project-name` | string | directory name | Compose project name; used when resolving `service/` or bare-name targets. |
 | `--pull` | string | `missing` | Pull policy for the helper image: `always`, `missing`, or `never`. |
 | `--restart` | string | `unless-stopped` with `--detach`, `no` otherwise | Restart policy to apply when a container exits. Takes the same values as `docker container create --restart`: `no`, `always`, `unless-stopped`, or `on-failure[:max-retries]`. Any value other than `no` requires `--detach`, because attached helpers are auto-removed. See [Helper Image](helper-image.md#restart-policy). |
+| `--skip-preflight` | bool | `false` | Skip the [preflight host-port check](#preflight-host-port-check). Needed to forward ports below 1024 when the plugin isn't running as root. |
 | `--udp-timeout` | duration | `60s` | Idle timeout for UDP pseudo-sessions inside the helper (`socat -T` for every UDP forward). Ignored when the invocation has no UDP pairs. |
 
 ## Auto-detection
@@ -83,6 +84,8 @@ The exception is a stale helper, one that can no longer reach its target (see [`
 ## Preflight host-port check
 
 Before creating a helper, the command briefly tries to `Listen()` on each requested host port. If the bind fails with `EADDRINUSE`, the command errors out with a clear message. This catches conflicts before Docker would report an opaque publish error.
+
+The check runs in the plugin's own process, so when the plugin isn't running as root it also rejects ports below 1024 with `permission denied`, even though the Docker daemon could publish them. Pass `--skip-preflight` to skip the check; any real conflict is then reported by Docker when the helper starts. Without the check, the default `localhost` addresses are published on `::1` even on hosts without IPv6, which fails; use `--address 127.0.0.1` or `127.0.0.1:` port specs there.
 
 ## Examples
 
@@ -150,6 +153,12 @@ Bind each port on its own address:
 
 ```bash
 docker pf my-container 127.0.0.1:8080:80 0.0.0.0:5432:5432 [::1]:9000:9000/udp
+```
+
+Forward a port below 1024 without running the plugin as root:
+
+```bash
+docker pf --skip-preflight my-container 127.0.0.1:80:80
 ```
 
 Send the helper's logs to a rotated JSON file:

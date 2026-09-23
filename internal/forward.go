@@ -95,6 +95,11 @@ type ForwardInput struct {
 	Name string
 	// ExtraLabels are user-supplied labels added to the helper container.
 	ExtraLabels map[string]string
+	// SkipPreflight skips checking that host ports are free before creating
+	// the helper, so ports the plugin process can't bind itself (such as
+	// ports below 1024 when not running as root) can still be published by
+	// the daemon. Conflicts then surface as Docker's publish error.
+	SkipPreflight bool
 	// UDPTimeout is the socat -T value for UDP forwards (idle pseudo-session
 	// timeout). Ignored when no UDP pairs are requested. Zero falls back to
 	// DefaultUDPTimeout.
@@ -213,12 +218,14 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	// checks where LocalPort == 0 was already resolved in resolveAutoPorts.
 	// Docker can release a removed helper's published ports shortly after
 	// the remove call returns, so retry briefly when one was just removed.
-	if err := preflightHostPorts(in.Addresses, pairs); err != nil {
-		if removedHelpers == 0 {
-			return ForwardResult{}, err
-		}
-		if err := waitForHostPorts(ctx, in.Addresses, pairs, portReleaseTimeout); err != nil {
-			return ForwardResult{}, err
+	if !in.SkipPreflight {
+		if err := preflightHostPorts(in.Addresses, pairs); err != nil {
+			if removedHelpers == 0 {
+				return ForwardResult{}, err
+			}
+			if err := waitForHostPorts(ctx, in.Addresses, pairs, portReleaseTimeout); err != nil {
+				return ForwardResult{}, err
+			}
 		}
 	}
 
@@ -263,7 +270,10 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	if err != nil {
 		return ForwardResult{}, fmt.Errorf("error creating helper container: %v", err)
 	}
-	if err := in.Client.ContainerStart(ctx, resp.ID, dockerClient.ContainerStartOptions{}); err != nil {
+	// Without preflight nothing has waited for a replaced helper's ports to
+	// be released, so retry the start on a port conflict in that case.
+	retryStart := in.SkipPreflight && removedHelpers > 0
+	if err := startWithPortRetry(ctx, in.Client, resp.ID, retryStart, portReleaseTimeout); err != nil {
 		_ = in.Client.ContainerRemove(ctx, resp.ID, dockerClient.ContainerRemoveOptions{Force: true})
 		return ForwardResult{}, fmt.Errorf("error starting helper container: %v", err)
 	}
@@ -441,6 +451,30 @@ func waitForHostPorts(ctx context.Context, defaultAddresses []string, pairs []Po
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+// startWithPortRetry starts the container. When retry is true and the start
+// fails because a host port is still held (Docker reports "port is already
+// allocated" or "address already in use"), it retries until the start
+// succeeds, ctx is canceled, or timeout elapses.
+func startWithPortRetry(ctx context.Context, cli DockerClientInterface, id string, retry bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := cli.ContainerStart(ctx, id, dockerClient.ContainerStartOptions{})
+		if err == nil || !retry || !isPortConflict(err) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+func isPortConflict(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "port is already allocated") || strings.Contains(msg, "address already in use")
 }
 
 // isIPv6Unavailable returns true when a listen failure is due to the host
