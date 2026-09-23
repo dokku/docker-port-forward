@@ -409,3 +409,156 @@ func TestCleanup_NilLoggerDoesNotPanic(t *testing.T) {
 
 // Compile-time check that the fake satisfies the interface Options expects.
 var _ client.APIClient = (*fakeClient)(nil)
+
+func TestForward_LogOptionsReachHelper(t *testing.T) {
+	fake := newTargetClient()
+	_, err := Forward(context.Background(), Options{
+		Target:    "web",
+		Ports:     []string{":80"},
+		Addresses: []string{"127.0.0.1"},
+		Detach:    true,
+		LogDriver: "json-file",
+		LogOpts:   map[string]string{"max-size": "10m", "max-file": "3"},
+		Client:    fake,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	logConfig := fake.created[0].HostConfig.LogConfig
+	if logConfig.Type != "json-file" || logConfig.Config["max-size"] != "10m" || logConfig.Config["max-file"] != "3" {
+		t.Fatalf("unexpected log config: %+v", logConfig)
+	}
+}
+
+func TestForward_LogOptsWithNoneDriverFailsBeforeDocker(t *testing.T) {
+	fake := newTargetClient()
+	_, err := Forward(context.Background(), Options{
+		Target:    "web",
+		Ports:     []string{"80"},
+		LogDriver: "none",
+		LogOpts:   map[string]string{"a": "b"},
+		Client:    fake,
+	})
+	if err == nil || err.Error() != "invalid logging opts for driver none" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("expected no Docker calls, got %d", fake.calls)
+	}
+}
+
+func TestForward_PerPortAddresses(t *testing.T) {
+	fake := newTargetClient()
+	result, err := Forward(context.Background(), Options{
+		Target:    "web",
+		Ports:     []string{"127.0.0.1::80", ":5432"},
+		Addresses: []string{"127.0.0.1"},
+		Detach:    true,
+		Client:    fake,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.Ports[0].Addresses; len(got) != 1 || got[0] != "127.0.0.1" {
+		t.Fatalf("unexpected addresses for port 80: %v", got)
+	}
+	labels := fake.created[0].Config.Labels
+	want := fmt.Sprintf("127.0.0.1:%d:80,127.0.0.1:%d:5432", result.Ports[0].Local, result.Ports[1].Local)
+	if labels[internal.LabelBindings] != want {
+		t.Fatalf("got bindings label %q, want %q", labels[internal.LabelBindings], want)
+	}
+	if labels[internal.LabelTargetNetwork] != "bridge" || labels[internal.LabelTargetAddress] != "172.17.0.5" {
+		t.Fatalf("unexpected target labels: %v", labels)
+	}
+}
+
+func TestForward_InvalidSpecAddress(t *testing.T) {
+	fake := newTargetClient()
+	_, err := Forward(context.Background(), Options{
+		Target: "web",
+		Ports:  []string{"example.com:8080:80"},
+		Client: fake,
+	})
+	if err == nil || err.Error() != `invalid port spec "example.com:8080:80": invalid address "example.com"` {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// driftClient returns a fake with two helpers for target "web-id" on the
+// default bridge: h1 dials the target's current IP and h2 an old one.
+func driftClient() *fakeClient {
+	fake := newTargetClient()
+	fake.list = []container.Summary{
+		{
+			ID:    "h1-id",
+			Names: []string{"/pf-1"},
+			State: "running",
+			Labels: map[string]string{
+				internal.LabelPortForward:   "true",
+				internal.LabelTarget:        "web-id",
+				internal.LabelTargetName:    "web",
+				internal.LabelTargetNetwork: "bridge",
+				internal.LabelTargetAddress: "172.17.0.5",
+				internal.LabelPorts:         "8080:80",
+				internal.LabelBindings:      "127.0.0.1:8080:80",
+			},
+		},
+		{
+			ID:    "h2-id",
+			Names: []string{"/pf-2"},
+			State: "running",
+			Labels: map[string]string{
+				internal.LabelPortForward:   "true",
+				internal.LabelTarget:        "web-id",
+				internal.LabelTargetName:    "web",
+				internal.LabelTargetNetwork: "bridge",
+				internal.LabelTargetAddress: "172.17.0.9",
+				internal.LabelPorts:         "9090:80",
+				internal.LabelBindings:      "127.0.0.1:9090:80",
+			},
+		},
+	}
+	return fake
+}
+
+func TestList_ReportsStaleness(t *testing.T) {
+	fake := driftClient()
+	helpers, err := List(context.Background(), ListOptions{Client: fake})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(helpers) != 2 {
+		t.Fatalf("expected 2 helpers, got %+v", helpers)
+	}
+	fresh, stale := helpers[0], helpers[1]
+	if fresh.Stale || fresh.TargetNetwork != "bridge" || fresh.TargetAddress != "172.17.0.5" || fresh.TargetName != "web" || fresh.Bindings != "127.0.0.1:8080:80" {
+		t.Fatalf("unexpected fresh helper: %+v", fresh)
+	}
+	if !stale.Stale || stale.StaleReason != "target IP changed from 172.17.0.9 to 172.17.0.5" {
+		t.Fatalf("unexpected stale helper: %+v", stale)
+	}
+	if fake.closed {
+		t.Fatal("a caller-supplied client must not be closed")
+	}
+}
+
+func TestList_StaleOnly(t *testing.T) {
+	helpers, err := List(context.Background(), ListOptions{Stale: true, Client: driftClient()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(helpers) != 1 || helpers[0].ID != "h2-id" {
+		t.Fatalf("expected only the stale helper, got %+v", helpers)
+	}
+}
+
+func TestCleanup_StaleOnlyRemovesStale(t *testing.T) {
+	fake := driftClient()
+	result, err := Cleanup(context.Background(), CleanupOptions{Stale: true, Client: fake})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Removed != 1 || len(fake.removed) != 1 || fake.removed[0] != "h2-id" {
+		t.Fatalf("expected only h2 removed, got result=%+v removed=%v", result, fake.removed)
+	}
+}

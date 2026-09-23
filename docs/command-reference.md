@@ -4,10 +4,10 @@
 
 ```bash
 # As a Docker CLI plugin:
-docker pf TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
+docker pf TARGET [[[ADDRESS:]LOCAL_PORT:]REMOTE_PORT ...] [flags]
 
 # Direct invocation:
-docker-port-forward port-forward TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
+docker-port-forward port-forward TARGET [[[ADDRESS:]LOCAL_PORT:]REMOTE_PORT ...] [flags]
 ```
 
 ## Arguments
@@ -15,11 +15,11 @@ docker-port-forward port-forward TARGET [[LOCAL_PORT:]REMOTE_PORT ...] [flags]
 | Argument | Required | Description |
 | ---------- | ---------- | ------------- |
 | `target` | Yes | The container or Compose service to forward to. See [Target Resolution](target-resolution.md). |
-| `ports` | Optional | Port specs in `[LOCAL_PORT:]REMOTE_PORT` form. See [Port specification](#port-specification). If omitted, listening ports are auto-detected from the target. |
+| `ports` | Optional | Port specs in `[[ADDRESS:]LOCAL_PORT:]REMOTE_PORT[/udp]` form. See [Port specification](#port-specification). If omitted, listening ports are auto-detected from the target. |
 
 ## Port specification
 
-Each port spec follows the same form as `kubectl port-forward`, with an optional Docker-style `/tcp` or `/udp` protocol suffix:
+Each port spec follows the same form as `kubectl port-forward`, extended with `docker run -p` style bind addresses and an optional `/tcp` or `/udp` protocol suffix:
 
 | Form | Meaning |
 | ---- | ------- |
@@ -29,6 +29,11 @@ Each port spec follows the same form as `kubectl port-forward`, with an optional
 | `REMOTE/udp` | Same port both sides, UDP. |
 | `LOCAL:REMOTE/udp` | Explicit local, UDP. |
 | `:REMOTE/udp` | Auto local, UDP. |
+| `ADDRESS:LOCAL:REMOTE` | Listen on `LOCAL` on `ADDRESS` only, instead of the `--address` list. |
+| `ADDRESS::REMOTE` | Let the OS pick a free local port on `ADDRESS`. |
+| `[IPV6]:LOCAL:REMOTE` | IPv6 addresses must be enclosed in brackets, e.g. `[::1]:8080:80`. |
+
+`ADDRESS` must be an IP literal or `localhost` (which binds both `127.0.0.1` and `::1`). Specs without an address are bound on every `--address`. Each spec with an address may also carry a protocol suffix, e.g. `0.0.0.0:5353:53/udp`.
 
 The protocol suffix is case-insensitive. An omitted suffix defaults to TCP. Only `tcp` and `udp` are accepted; other suffixes (`sctp`, `icmp`, …) are rejected.
 
@@ -51,6 +56,8 @@ Multiple port specs may be provided. If no port specs are given, the command pro
 | `-f, --file` | string (repeatable) | auto-detect | Path to a Compose file. Only used when `TARGET` requires Compose resolution. |
 | `--helper-image` | string | `alpine/socat` | Image used for the sidecar helper container. See [Helper Image](helper-image.md). |
 | `--label` | string (repeatable) | | Extra label to apply to the helper container, in `key=value` form. Repeat to add multiple. |
+| `--log-driver` | string | daemon default | Logging driver for the container. Same as `docker container create --log-driver`. Applies to the helper only, not the short-lived auto-detect probe. |
+| `--log-opt` | string (repeatable) | | Log driver options, in `key=value` form. Same as `docker container create --log-opt`. Not allowed with `--log-driver none`. |
 | `--name` | string | auto-generated | Name to assign to the helper container. When omitted, a name like `port-forward-<target>-<rand>` is generated. Use the name with `cleanup --name` to remove a specific forward. |
 | `--profile` | string (repeatable) | | One or more Compose profiles to enable when resolving services. |
 | `--project-directory` | string | | Alternate Compose project directory. |
@@ -69,7 +76,9 @@ When no port specs are supplied, the command starts a short-lived probe containe
 
 ## Idempotency
 
-If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts. The existing helper is reused as-is, even if it was created with a different `--restart` policy.
+If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts. The existing helper is reused as-is, even if it was created with a different `--restart`, `--log-driver` or `--log-opt` setting.
+
+The exception is a stale helper, one that can no longer reach its target (see [`port-forward list`](#port-forward-list)). A stale helper is removed and replaced with a new one, so re-running the command fixes a forward whose target changed IP on the default `bridge` network. A running helper that holds a requested host port for a target container that no longer exists is also removed.
 
 ## Preflight host-port check
 
@@ -137,6 +146,18 @@ Run in the background without restarting the helper when it exits or the daemon 
 docker pf --detach --restart no my-db 5432:5432
 ```
 
+Bind each port on its own address:
+
+```bash
+docker pf my-container 127.0.0.1:8080:80 0.0.0.0:5432:5432 [::1]:9000:9000/udp
+```
+
+Send the helper's logs to a rotated JSON file:
+
+```bash
+docker pf --detach --log-driver json-file --log-opt max-size=10m my-container 8080:80
+```
+
 Add extra labels to the helper container (useful for your own `docker ps --filter` queries):
 
 ```bash
@@ -183,6 +204,7 @@ docker pf cleanup [flags]
 | ------ | ------ | --------- | ------------- |
 | `--dry-run` | bool | `false` | Print the helpers that would be removed without removing them. |
 | `--name` | string | | Act on the single helper with this container name. Fails if the container exists but isn't a port-forward helper. |
+| `--stale` | bool | `false` | Only act on stale helpers, those that can no longer reach their target. See [`port-forward list`](#port-forward-list). |
 | `--target` | string | | Only act on helpers for the given target container id or name. Ignored when `--name` is set. |
 
 Examples:
@@ -192,15 +214,41 @@ docker pf cleanup
 docker pf cleanup --dry-run
 docker pf cleanup --target my-container
 docker pf cleanup --name port-forward-mydb-a9c2
+docker pf cleanup --stale
 ```
 
-The command prints one line per matching helper (`<short-id>  name=<name> target=<target-short-id> ports=<ports>`) and a summary. Exit code is zero when all matching helpers were removed (or when none were found), non-zero when some removals failed.
+The command prints one line per matching helper (`<short-id>  name=<name> target=<target-short-id> ports=<ports>`, followed by `stale="<reason>"` for stale helpers) and a summary. Exit code is zero when all matching helpers were removed (or when none were found), non-zero when some removals failed.
 
 Manual fallback:
 
 ```bash
 docker ps -aq --filter 'label=com.dokku.port-forward=true' | xargs -r docker rm -f
 ```
+
+## port-forward list
+
+List helper sidecar containers and whether they can still reach their target.
+
+```bash
+docker pf list [flags]
+```
+
+| Flag | Type | Default | Description |
+| ------ | ------ | --------- | ------------- |
+| `--name` | string | | Show the single helper with this container name. Fails if the container exists but isn't a port-forward helper. |
+| `--stale` | bool | `false` | Only show stale helpers. |
+| `--target` | string | | Only show helpers for the given target container id or name. Ignored when `--name` is set. |
+
+Each row has the form `<short-id>  name=<name> target=<target-short-id> ports=<ports> bindings=<bindings> network=<network> address=<address>`, where `network` and `address` are the network the helper shares with the target and what it dials there. Stale helpers end with `stale="<reason>"`.
+
+A helper is stale when:
+
+- The helper dials a container name (user-defined networks) and no container with that name exists, or it is no longer attached to the network.
+- The helper dials an IP (the default `bridge` network) and the target container no longer exists, is no longer attached to the network, or is running with a different IP.
+
+A stopped target is not stale. Helpers created by versions that didn't record the network and address are never reported stale.
+
+Re-running `docker pf ... --detach` replaces a stale helper that covers the requested ports (see [Idempotency](#idempotency)), and `docker pf cleanup --stale` removes every stale helper.
 
 ## See also
 

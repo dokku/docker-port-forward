@@ -213,6 +213,8 @@ teardown() {
   assert_output_contains "--label"
   assert_output_contains "--name"
   assert_output_contains "--restart"
+  assert_output_contains "--log-driver"
+  assert_output_contains "--log-opt"
   assert_output_contains "<target>"
   assert_output_contains "ports..."
 }
@@ -261,6 +263,24 @@ teardown() {
   assert_output_contains "conflicting options: cannot specify both --restart and an attached (auto-removed) helper; use --detach"
 }
 
+@test "smoke: port-forward rejects --log-opt with the none log driver" {
+  run "$DOCKER_PORT_FORWARD" port-forward --log-driver none --log-opt a=b container/foo 8080:80
+  assert_failure
+  assert_output_contains "invalid logging opts for driver none"
+}
+
+@test "smoke: port-forward rejects a non-IP address in a port spec" {
+  run "$DOCKER_PORT_FORWARD" port-forward container/foo example.com:8080:80
+  assert_failure
+  assert_output_contains 'invalid address "example.com"'
+}
+
+@test "smoke: port-forward rejects an unbracketed IPv6 address in a port spec" {
+  run "$DOCKER_PORT_FORWARD" port-forward container/foo ::1:8080:80
+  assert_failure
+  assert_output_contains "IPv6 addresses must be enclosed in brackets"
+}
+
 @test "smoke: port-forward rejects invalid --label format" {
   run "$DOCKER_PORT_FORWARD" port-forward --label badformat container/foo 8080:80
   assert_failure
@@ -303,11 +323,21 @@ teardown() {
   assert_output_contains "<target>"
 }
 
+@test "smoke: list --help prints flags" {
+  run "$DOCKER_PORT_FORWARD" port-forward list --help
+  assert_success
+  assert_output_contains "--name"
+  assert_output_contains "--stale"
+  assert_output_contains "--target"
+  assert_output_contains "List port-forward helper containers"
+}
+
 @test "smoke: cleanup --help prints flags" {
   run "$DOCKER_PORT_FORWARD" port-forward cleanup --help
   assert_success
   assert_output_contains "--dry-run"
   assert_output_contains "--name"
+  assert_output_contains "--stale"
   assert_output_contains "--target"
   assert_output_contains "Remove leftover port-forward helper containers"
 }
@@ -374,6 +404,120 @@ teardown() {
   run docker inspect -f '{{.HostConfig.RestartPolicy.Name}}:{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "$NAME"
   assert_success
   assert_output "on-failure:2"
+}
+
+@test "integration: --log-driver and --log-opt configure the helper logging" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-log-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --log-driver json-file \
+    --log-opt max-size=1m \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{.HostConfig.LogConfig.Type}} {{index .HostConfig.LogConfig.Config "max-size"}}' "$NAME"
+  assert_success
+  assert_output "json-file 1m"
+}
+
+@test "integration: per-port addresses bind each port on its own address" {
+  require_docker
+  start_nginx_target
+  P1=$(free_port)
+  P2=$(free_port)
+  NAME="dpf-bats-perport-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "127.0.0.1:$P1:80" "0.0.0.0:$P2:8080"
+  assert_success
+
+  run docker inspect -f '{{(index (index .HostConfig.PortBindings "80/tcp") 0).HostIp}}' "$NAME"
+  assert_success
+  assert_output "127.0.0.1"
+
+  run docker inspect -f '{{(index (index .HostConfig.PortBindings "8080/tcp") 0).HostIp}}' "$NAME"
+  assert_success
+  assert_output "0.0.0.0"
+
+  if ! wait_http "http://127.0.0.1:${P1}/" 10; then
+    flunk "curl to forwarded port ${P1} never succeeded"
+  fi
+}
+
+@test "integration: list shows the network and address each helper dials" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-list-$$"
+  IP=$(docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' "$TARGET")
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run "$DOCKER_PORT_FORWARD" port-forward list --name "$NAME"
+  assert_success
+  assert_output_contains "name=$NAME"
+  assert_output_contains "network=bridge"
+  assert_output_contains "address=$IP"
+  refute_output_contains "stale="
+}
+
+@test "integration: bridge IP drift is reported and fixed by re-running the forward" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-drift-$$"
+  OLD_IP=$(docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' "$TARGET")
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  # Stop the target, take its IP with another container, and start it again.
+  docker stop -t 1 "$TARGET" >/dev/null
+  docker run -d --label "${INTEGRATION_LABEL}=true" nginx:alpine >/dev/null
+  docker start "$TARGET" >/dev/null
+  NEW_IP=$(docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' "$TARGET")
+  if [ "$OLD_IP" = "$NEW_IP" ]; then
+    skip "target kept IP $OLD_IP after restart"
+  fi
+
+  run "$DOCKER_PORT_FORWARD" port-forward list --stale
+  assert_success
+  assert_output_contains "name=$NAME"
+  assert_output_contains "target IP changed from $OLD_IP to $NEW_IP"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+  assert_output_contains "Replacing stale helper \"$NAME\""
+
+  run docker inspect -f '{{index .Config.Labels "com.dokku.port-forward.target-address"}}' "$NAME"
+  assert_success
+  assert_output "$NEW_IP"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded after replacement"
+  fi
 }
 
 @test "integration: extra labels are applied to the helper container" {

@@ -36,6 +36,17 @@ const (
 	LabelName        = "com.dokku.port-forward.name"
 	LabelPorts       = "com.dokku.port-forward.ports"
 	LabelAddresses   = "com.dokku.port-forward.addresses"
+	// LabelBindings records every published binding as
+	// ADDRESS:LOCAL:REMOTE[/proto], with IPv6 addresses bracketed.
+	LabelBindings = "com.dokku.port-forward.bindings"
+	// LabelTargetName is the target's container name when the helper was
+	// created.
+	LabelTargetName = "com.dokku.port-forward.target-name"
+	// LabelTargetNetwork is the network the helper shares with the target.
+	LabelTargetNetwork = "com.dokku.port-forward.target-network"
+	// LabelTargetAddress is what the helper dials: the target's container
+	// name on a user-defined network, or its IP on the default bridge.
+	LabelTargetAddress = "com.dokku.port-forward.target-address"
 )
 
 // Pull policies for the helper image.
@@ -63,9 +74,11 @@ type Logger interface {
 
 // ForwardInput bundles inputs to StartForward.
 type ForwardInput struct {
-	Client         DockerClientInterface
-	Target         ResolvedTarget
-	Pairs          []PortPair
+	Client DockerClientInterface
+	Target ResolvedTarget
+	Pairs  []PortPair
+	// Addresses are the default bind addresses for pairs without their own
+	// Address.
 	Addresses      []string
 	HelperImage    string
 	PullPolicy     string
@@ -75,6 +88,9 @@ type ForwardInput struct {
 	// back to unless-stopped. Attached helpers are auto-removed and always
 	// use "no".
 	RestartPolicy container.RestartPolicy
+	// LogConfig is the helper container's logging driver and options. An
+	// empty Type uses the daemon default.
+	LogConfig container.LogConfig
 	// Name is the helper container name. If empty, a name is auto-generated.
 	Name string
 	// ExtraLabels are user-supplied labels added to the helper container.
@@ -99,6 +115,11 @@ type ForwardResult struct {
 // StartForward either reuses an existing helper that already covers any of
 // the requested (local, remote) pairs for the same target, or creates a new
 // helper container that binds each host port and forwards to the target.
+//
+// An overlapping helper that no longer reaches its target (see CheckHelper)
+// is replaced rather than reused, and a running helper that holds a
+// requested host port for a target container that no longer exists is
+// removed.
 //
 // In detached mode it returns immediately after the helper is running. In
 // attached mode it blocks until ctx is canceled, then stops the helper.
@@ -130,41 +151,75 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	if in.UDPTimeout <= 0 {
 		in.UDPTimeout = DefaultUDPTimeout
 	}
-	addresses := expandAddresses(in.Addresses)
-	if len(addresses) == 0 {
+	if len(expandAddresses(in.Addresses)) == 0 {
 		return ForwardResult{}, errors.New("no valid listen addresses")
 	}
 	// Resolve any auto-allocated local ports (LocalPort == 0) by briefly
-	// binding a TCP listener on "" to have the OS assign a free port. This
-	// lets us pass a concrete port to Docker's -p binding and ensures both
-	// IPv4 and IPv6 bindings for "localhost" share the same port number.
-	// resolveAutoPorts also normalizes empty protocols to TCP so equality and
-	// label encoding are consistent, without mutating the caller's slice.
-	pairs, err := resolveAutoPorts(in.Pairs)
+	// binding a listener on the pair's first address to have the OS assign a
+	// free port. This lets us pass a concrete port to Docker's -p binding and
+	// ensures both IPv4 and IPv6 bindings for "localhost" share the same port
+	// number. resolveAutoPorts also normalizes empty protocols to TCP so
+	// equality and label encoding are consistent, without mutating the
+	// caller's slice.
+	pairs, err := resolveAutoPorts(in.Pairs, in.Addresses)
 	if err != nil {
 		return ForwardResult{}, err
 	}
 
 	// 1. Idempotency: if an existing helper for this target shares any
-	// (local, remote) pair with our request, exit 0 and reuse it.
-	if existing, match, err := findOverlappingHelper(ctx, in.Client, in.Target.ContainerID, pairs); err != nil {
-		return ForwardResult{}, err
-	} else if match {
+	// (local, remote) pair with our request, exit 0 and reuse it, unless it
+	// no longer reaches the target, in which case replace it.
+	removedHelpers := 0
+	for {
+		existing, match, err := findOverlappingHelper(ctx, in.Client, in.Target.ContainerID, pairs)
+		if err != nil {
+			return ForwardResult{}, err
+		}
+		if !match {
+			break
+		}
 		name := strings.TrimPrefix(helperName(existing), "/")
-		in.Logger.Info(fmt.Sprintf("Existing helper %q already forwards %s for target %s; no action taken.",
-			name, renderPairs(pairs), shortID(in.Target.ContainerID)))
-		return ForwardResult{
-			HelperID:   existing.ID,
-			HelperName: name,
-			Pairs:      pairs,
-			Existing:   true,
-		}, nil
+		stale, reason, err := CheckHelper(ctx, in.Client, existing)
+		if err != nil {
+			return ForwardResult{}, err
+		}
+		if !stale {
+			in.Logger.Info(fmt.Sprintf("Existing helper %q already forwards %s for target %s; no action taken.",
+				name, renderPairs(pairs), shortID(in.Target.ContainerID)))
+			return ForwardResult{
+				HelperID:   existing.ID,
+				HelperName: name,
+				Pairs:      pairs,
+				Existing:   true,
+			}, nil
+		}
+		in.Logger.Info(fmt.Sprintf("Replacing stale helper %q: %s", name, reason))
+		if RemoveHelpers(ctx, in.Client, []string{existing.ID}, in.Logger) != 1 {
+			return ForwardResult{}, fmt.Errorf("error removing stale helper %q", name)
+		}
+		removedHelpers++
 	}
+
+	// Helpers for a target container that no longer exists (for example,
+	// one recreated by compose) can't be found by target id above but still
+	// hold host ports; remove any that collide with this request.
+	orphans, err := removeOrphanedHelpers(ctx, in.Client, in.Target.ContainerID, pairs, in.Logger)
+	if err != nil {
+		return ForwardResult{}, err
+	}
+	removedHelpers += orphans
 
 	// 2. Preflight: ensure each requested (address, local_port) is free. Skip
 	// checks where LocalPort == 0 was already resolved in resolveAutoPorts.
-	if err := preflightHostPorts(addresses, pairs); err != nil {
-		return ForwardResult{}, err
+	// Docker can release a removed helper's published ports shortly after
+	// the remove call returns, so retry briefly when one was just removed.
+	if err := preflightHostPorts(in.Addresses, pairs); err != nil {
+		if removedHelpers == 0 {
+			return ForwardResult{}, err
+		}
+		if err := waitForHostPorts(ctx, in.Addresses, pairs, portReleaseTimeout); err != nil {
+			return ForwardResult{}, err
+		}
 	}
 
 	if err := ensureHelperImage(ctx, in.Client, in.HelperImage, in.PullPolicy, in.Logger); err != nil {
@@ -187,21 +242,22 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	if name == "" {
 		name = autoName(info.Name)
 	}
-	session := randomHex(8)
-	cfg, hostCfg := buildHelperContainerConfig(
-		in.Target.ContainerID,
-		in.HelperImage,
-		pairs,
-		addresses,
-		targetAddr,
-		name,
-		session,
-		in.ExtraLabels,
-		in.Detach,
-		in.RestartPolicy,
-		in.UDPTimeout,
-	)
-	hostCfg.NetworkMode = container.NetworkMode(networkName)
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      in.Target.ContainerID,
+		TargetName:    strings.TrimPrefix(info.Name, "/"),
+		TargetNetwork: networkName,
+		TargetAddress: targetAddr,
+		Image:         in.HelperImage,
+		Pairs:         pairs,
+		Addresses:     in.Addresses,
+		Name:          name,
+		Session:       randomHex(8),
+		ExtraLabels:   in.ExtraLabels,
+		Detach:        in.Detach,
+		RestartPolicy: in.RestartPolicy,
+		LogConfig:     in.LogConfig,
+		UDPTimeout:    in.UDPTimeout,
+	})
 
 	resp, err := in.Client.ContainerCreate(ctx, cfg, hostCfg, &network.NetworkingConfig{}, nil, name)
 	if err != nil {
@@ -217,9 +273,9 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		return ForwardResult{}, fmt.Errorf("helper container did not start: %v", err)
 	}
 
-	for _, addr := range addresses {
-		for _, p := range pairs {
-			proto := NormalizeProtocol(p.Protocol)
+	for _, p := range pairs {
+		proto := NormalizeProtocol(p.Protocol)
+		for _, addr := range PairAddresses(p, in.Addresses) {
 			in.Logger.Info(fmt.Sprintf("Forwarding %s:%d -> %s:%d/%s (container %s)",
 				addr, p.LocalPort, in.Target.ContainerName, p.RemotePort, proto, shortID(in.Target.ContainerID)))
 		}
@@ -239,28 +295,34 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 }
 
 // resolveAutoPorts replaces any LocalPort == 0 with an OS-assigned free port
-// so the same port can be published to all requested bind addresses. The
-// auto-allocation happens against the spec's protocol (TCP or UDP) so the
-// returned port is guaranteed to be free for the relevant socket type.
-func resolveAutoPorts(in []PortPair) ([]PortPair, error) {
+// so the same port can be published to all of the pair's bind addresses. The
+// port is allocated on the pair's first address (its own Address, or the
+// first default address) against the spec's protocol (TCP or UDP), so the
+// returned port is free for the relevant socket type on that address.
+func resolveAutoPorts(in []PortPair, defaultAddresses []string) ([]PortPair, error) {
 	out := make([]PortPair, len(in))
 	for i, p := range in {
 		proto := NormalizeProtocol(p.Protocol)
 		if p.LocalPort != 0 {
-			out[i] = PortPair{LocalPort: p.LocalPort, RemotePort: p.RemotePort, Protocol: proto}
+			out[i] = PortPair{Address: p.Address, LocalPort: p.LocalPort, RemotePort: p.RemotePort, Protocol: proto}
 			continue
 		}
+		bindAddr := "127.0.0.1"
+		if addrs := PairAddresses(p, defaultAddresses); len(addrs) > 0 {
+			bindAddr = addrs[0]
+		}
+		bind := net.JoinHostPort(bindAddr, "0")
 		var port int
 		switch proto {
 		case ProtocolTCP:
-			l, err := net.Listen("tcp", "127.0.0.1:0")
+			l, err := net.Listen("tcp", bind)
 			if err != nil {
 				return nil, fmt.Errorf("error allocating local tcp port: %v", err)
 			}
 			port = l.Addr().(*net.TCPAddr).Port
 			_ = l.Close()
 		case ProtocolUDP:
-			c, err := net.ListenPacket("udp", "127.0.0.1:0")
+			c, err := net.ListenPacket("udp", bind)
 			if err != nil {
 				return nil, fmt.Errorf("error allocating local udp port: %v", err)
 			}
@@ -269,9 +331,18 @@ func resolveAutoPorts(in []PortPair) ([]PortPair, error) {
 		default:
 			return nil, fmt.Errorf("unsupported protocol %q", proto)
 		}
-		out[i] = PortPair{LocalPort: port, RemotePort: p.RemotePort, Protocol: proto}
+		out[i] = PortPair{Address: p.Address, LocalPort: port, RemotePort: p.RemotePort, Protocol: proto}
 	}
 	return out, nil
+}
+
+// PairAddresses returns the concrete addresses a pair is bound on: its own
+// Address when set, otherwise defaults, with "localhost" expanded.
+func PairAddresses(p PortPair, defaults []string) []string {
+	if p.Address != "" {
+		return expandAddresses([]string{p.Address})
+	}
+	return expandAddresses(defaults)
 }
 
 // expandAddresses returns the concrete list of IPs to bind, expanding
@@ -304,7 +375,7 @@ func expandAddresses(addrs []string) []string {
 }
 
 // preflightHostPorts attempts to bind every (address, local_port, protocol)
-// triple briefly to detect conflicts before asking Docker to publish them.
+// triple briefly, using each pair's own addresses (see PairAddresses), to detect conflicts before asking Docker to publish them.
 // TCP uses net.Listen; UDP uses net.ListenPacket. A real conflict (address
 // already in use, permission denied) always fails the preflight. Only
 // "IPv6 is unavailable"-class errors are tolerated so that a default
@@ -312,10 +383,10 @@ func expandAddresses(addrs []string) []string {
 //
 // Because TCP and UDP sockets don't collide, a single host port may be
 // requested for both protocols without false positives.
-func preflightHostPorts(addresses []string, pairs []PortPair) error {
+func preflightHostPorts(defaultAddresses []string, pairs []PortPair) error {
 	for _, p := range pairs {
 		proto := NormalizeProtocol(p.Protocol)
-		for _, addr := range addresses {
+		for _, addr := range PairAddresses(p, defaultAddresses) {
 			host := addr
 			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 				host = "[" + host + "]"
@@ -349,6 +420,27 @@ func preflightHostPorts(addresses []string, pairs []PortPair) error {
 		}
 	}
 	return nil
+}
+
+// portReleaseTimeout bounds how long StartForward waits for a replaced
+// helper's host ports to be released.
+const portReleaseTimeout = 10 * time.Second
+
+// waitForHostPorts retries preflightHostPorts until it succeeds, ctx is
+// canceled, or timeout elapses, returning the last preflight error.
+func waitForHostPorts(ctx context.Context, defaultAddresses []string, pairs []PortPair, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := preflightHostPorts(defaultAddresses, pairs)
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // isIPv6Unavailable returns true when a listen failure is due to the host
@@ -395,28 +487,41 @@ func pullImage(ctx context.Context, cli DockerClientInterface, ref string, logge
 	return nil
 }
 
+// helperConfig describes the helper container to build.
+type helperConfig struct {
+	TargetID      string
+	TargetName    string
+	TargetNetwork string
+	// TargetAddress is what socat dials: the target's container name or IP.
+	TargetAddress string
+	Image         string
+	Pairs         []PortPair
+	// Addresses are the default bind addresses for pairs without their own
+	// Address.
+	Addresses     []string
+	Name          string
+	Session       string
+	ExtraLabels   map[string]string
+	Detach        bool
+	RestartPolicy container.RestartPolicy
+	LogConfig     container.LogConfig
+	UDPTimeout    time.Duration
+}
+
 // buildHelperContainerConfig prepares the Docker Config + HostConfig for the
 // sidecar helper. The helper runs one socat process per distinct
 // (remote_port, protocol) pair, supervised by sh. TCP uses
 // `socat TCP-LISTEN:<r>,fork,reuseaddr TCP:<target>:<r>`; UDP adds `-T <timeout>`
-// and swaps in `UDP-LISTEN` / `UDP:` addresses.
-func buildHelperContainerConfig(
-	targetID, helperImage string,
-	pairs []PortPair,
-	addresses []string,
-	targetAddr, name, session string,
-	extraLabels map[string]string,
-	detach bool,
-	restartPolicy container.RestartPolicy,
-	udpTimeout time.Duration,
-) (*container.Config, *container.HostConfig) {
+// and swaps in `UDP-LISTEN` / `UDP:` addresses. The returned HostConfig has
+// NetworkMode set to the target's network.
+func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.HostConfig) {
 	type socatKey struct {
 		remote int
 		proto  Protocol
 	}
 	seen := map[socatKey]struct{}{}
-	keys := make([]socatKey, 0, len(pairs))
-	for _, p := range pairs {
+	keys := make([]socatKey, 0, len(h.Pairs))
+	for _, p := range h.Pairs {
 		k := socatKey{remote: p.RemotePort, proto: NormalizeProtocol(p.Protocol)}
 		if _, ok := seen[k]; ok {
 			continue
@@ -431,7 +536,7 @@ func buildHelperContainerConfig(
 		return keys[i].remote < keys[j].remote
 	})
 
-	udpSeconds := int(udpTimeout.Seconds())
+	udpSeconds := int(h.UDPTimeout.Seconds())
 	if udpSeconds <= 0 {
 		udpSeconds = int(DefaultUDPTimeout.Seconds())
 	}
@@ -442,24 +547,26 @@ func buildHelperContainerConfig(
 		switch k.proto {
 		case ProtocolUDP:
 			fmt.Fprintf(&shCmd, "socat -T %d UDP-LISTEN:%d,fork,reuseaddr UDP:%s:%d & ",
-				udpSeconds, k.remote, targetAddr, k.remote)
+				udpSeconds, k.remote, h.TargetAddress, k.remote)
 		default:
 			fmt.Fprintf(&shCmd, "socat TCP-LISTEN:%d,fork,reuseaddr TCP:%s:%d & ",
-				k.remote, targetAddr, k.remote)
+				k.remote, h.TargetAddress, k.remote)
 		}
 	}
 	shCmd.WriteString("wait")
 
 	exposed := network.PortSet{}
 	bindings := network.PortMap{}
-	for _, p := range pairs {
+	boundAddresses := map[string]struct{}{}
+	for _, p := range h.Pairs {
 		proto := string(NormalizeProtocol(p.Protocol))
 		port, err := network.ParsePort(strconv.Itoa(p.RemotePort) + "/" + proto)
 		if err != nil {
 			continue
 		}
 		exposed[port] = struct{}{}
-		for _, addr := range addresses {
+		for _, addr := range PairAddresses(p, h.Addresses) {
+			boundAddresses[addr] = struct{}{}
 			// HostIP is a netip.Addr in the moby API; a non-IP address yields
 			// the zero value, which the daemon treats as "all interfaces".
 			hostIP, _ := netip.ParseAddr(addr)
@@ -469,21 +576,30 @@ func buildHelperContainerConfig(
 			})
 		}
 	}
+	addressList := make([]string, 0, len(boundAddresses))
+	for addr := range boundAddresses {
+		addressList = append(addressList, addr)
+	}
+	sort.Strings(addressList)
 
 	labels := map[string]string{
-		LabelPortForward: "true",
-		LabelTarget:      targetID,
-		LabelSession:     session,
-		LabelName:        name,
-		LabelPorts:       EncodePortPairs(pairs),
-		LabelAddresses:   strings.Join(addresses, ","),
+		LabelPortForward:   "true",
+		LabelTarget:        h.TargetID,
+		LabelTargetName:    h.TargetName,
+		LabelTargetNetwork: h.TargetNetwork,
+		LabelTargetAddress: h.TargetAddress,
+		LabelSession:       h.Session,
+		LabelName:          h.Name,
+		LabelPorts:         EncodePortPairs(h.Pairs),
+		LabelBindings:      EncodeBindings(h.Pairs, h.Addresses),
+		LabelAddresses:     strings.Join(addressList, ","),
 	}
-	for k, v := range extraLabels {
+	for k, v := range h.ExtraLabels {
 		labels[k] = v
 	}
 
 	cfg := &container.Config{
-		Image:        helperImage,
+		Image:        h.Image,
 		Entrypoint:   []string{"sh", "-c"},
 		Cmd:          []string{shCmd.String()},
 		Labels:       labels,
@@ -492,13 +608,16 @@ func buildHelperContainerConfig(
 	// Attached helpers are ephemeral and auto-removed, which Docker doesn't
 	// allow together with a restart policy. Detached helpers need to survive
 	// CLI exit so they can be cleaned up explicitly later.
-	if !detach {
+	restartPolicy := h.RestartPolicy
+	if !h.Detach {
 		restartPolicy = container.RestartPolicy{Name: container.RestartPolicyDisabled}
 	}
 	hostCfg := &container.HostConfig{
+		NetworkMode:   container.NetworkMode(h.TargetNetwork),
 		PortBindings:  bindings,
-		AutoRemove:    !detach,
+		AutoRemove:    !h.Detach,
 		RestartPolicy: restartPolicy,
+		LogConfig:     h.LogConfig,
 	}
 	return cfg, hostCfg
 }
@@ -551,6 +670,7 @@ func findOverlappingHelper(ctx context.Context, cli DockerClientInterface, targe
 	want := make(map[PortPair]struct{}, len(requested))
 	for _, p := range requested {
 		p.Protocol = NormalizeProtocol(p.Protocol)
+		p.Address = ""
 		want[p] = struct{}{}
 	}
 	for _, c := range list {
@@ -701,6 +821,39 @@ func DecodePortPairs(s string) ([]PortPair, error) {
 		out = append(out, PortPair{LocalPort: l, RemotePort: r, Protocol: proto})
 	}
 	return out, nil
+}
+
+// EncodeBindings serializes every published binding as
+// "ADDRESS:LOCAL:REMOTE[/PROTO],..." using each pair's own addresses (see
+// PairAddresses), with IPv6 addresses bracketed. Each entry is a valid port
+// spec, so DecodeBindings can parse it back with ParsePortSpec.
+func EncodeBindings(pairs []PortPair, defaultAddresses []string) string {
+	parts := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		for _, addr := range PairAddresses(p, defaultAddresses) {
+			b := p
+			b.Address = addr
+			parts = append(parts, b.String())
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// DecodeBindings parses a list produced by EncodeBindings. Invalid entries
+// are skipped.
+func DecodeBindings(s string) []PortPair {
+	if s == "" {
+		return nil
+	}
+	out := make([]PortPair, 0, strings.Count(s, ",")+1)
+	for _, tok := range strings.Split(s, ",") {
+		p, err := ParsePortSpec(tok)
+		if err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func autoName(containerName string) string {

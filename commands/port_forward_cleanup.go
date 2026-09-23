@@ -17,6 +17,7 @@ type PortForwardCleanupCommand struct {
 
 	dryRun bool
 	name   string
+	stale  bool
 	target string
 }
 
@@ -35,10 +36,11 @@ func (c *PortForwardCleanupCommand) Help() string {
 func (c *PortForwardCleanupCommand) Examples() map[string]string {
 	appName := os.Getenv("CLI_APP_NAME")
 	return map[string]string{
-		"Remove all stale helpers":                  fmt.Sprintf("%s %s", appName, c.Name()),
-		"Preview what would be removed":             fmt.Sprintf("%s %s --dry-run", appName, c.Name()),
-		"Remove only helpers for a specific target": fmt.Sprintf("%s %s --target abc123", appName, c.Name()),
-		"Remove a specific helper by name":          fmt.Sprintf("%s %s --name port-forward-mydb-a9c2", appName, c.Name()),
+		"Remove all stale helpers":                     fmt.Sprintf("%s %s", appName, c.Name()),
+		"Preview what would be removed":                fmt.Sprintf("%s %s --dry-run", appName, c.Name()),
+		"Remove only helpers for a specific target":    fmt.Sprintf("%s %s --target abc123", appName, c.Name()),
+		"Remove a specific helper by name":             fmt.Sprintf("%s %s --name port-forward-mydb-a9c2", appName, c.Name()),
+		"Remove helpers that can't reach their target": fmt.Sprintf("%s %s --stale", appName, c.Name()),
 	}
 }
 
@@ -58,6 +60,7 @@ func (c *PortForwardCleanupCommand) FlagSet() *flag.FlagSet {
 	f := c.Meta.FlagSet(c.Name(), command.FlagSetClient)
 	f.BoolVar(&c.dryRun, "dry-run", false, "list helpers that would be removed without removing them")
 	f.StringVar(&c.name, "name", "", "only act on the helper with this container name")
+	f.BoolVar(&c.stale, "stale", false, "only act on helpers that can no longer reach their target")
 	f.StringVar(&c.target, "target", "", "only act on helpers for the given target container id or name")
 	return f
 }
@@ -68,6 +71,7 @@ func (c *PortForwardCleanupCommand) AutocompleteFlags() complete.Flags {
 		complete.Flags{
 			"--dry-run": complete.PredictNothing,
 			"--name":    complete.PredictAnything,
+			"--stale":   complete.PredictNothing,
 			"--target":  complete.PredictAnything,
 		},
 	)
@@ -91,6 +95,7 @@ func (c *PortForwardCleanupCommand) Run(args []string) int {
 	result, err := portforward.Cleanup(context.Background(), portforward.CleanupOptions{
 		DryRun: c.dryRun,
 		Name:   c.name,
+		Stale:  c.stale,
 		Target: c.target,
 		Logger: logger,
 	})
@@ -105,8 +110,7 @@ func (c *PortForwardCleanupCommand) Run(args []string) int {
 	}
 
 	for _, h := range result.Helpers {
-		c.Ui.Info(fmt.Sprintf("%s  name=%s target=%s ports=%s",
-			truncateID(h.ID), h.Name, truncateID(h.Target), h.Ports))
+		c.Ui.Info(formatHelperRow(h, false))
 	}
 
 	if c.dryRun {
@@ -119,6 +123,21 @@ func (c *PortForwardCleanupCommand) Run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// formatHelperRow renders one helper for `cleanup` and `list` output. The
+// detailed form adds the network and address the helper dials. A stale
+// helper always ends with its stale reason.
+func formatHelperRow(h portforward.Helper, detailed bool) string {
+	row := fmt.Sprintf("%s  name=%s target=%s ports=%s",
+		truncateID(h.ID), h.Name, truncateID(h.Target), h.Ports)
+	if detailed {
+		row += fmt.Sprintf(" bindings=%s network=%s address=%s", h.Bindings, h.TargetNetwork, h.TargetAddress)
+	}
+	if h.Stale {
+		row += fmt.Sprintf(" stale=%q", h.StaleReason)
+	}
+	return row
 }
 
 func truncateID(id string) string {

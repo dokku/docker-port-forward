@@ -1,10 +1,11 @@
 # Library Usage
 
-The `github.com/dokku/docker-port-forward/portforward` package exposes the same functionality as the CLI to Go programs. Its API mirrors the two commands:
+The `github.com/dokku/docker-port-forward/portforward` package exposes the same functionality as the CLI to Go programs. Its API mirrors the commands:
 
 | Command | Function | Options |
 | ------- | -------- | ------- |
 | `docker port-forward` | `portforward.Forward` | `portforward.Options` |
+| `docker port-forward list` | `portforward.List` | `portforward.ListOptions` |
 | `docker port-forward cleanup` | `portforward.Cleanup` | `portforward.CleanupOptions` |
 
 Each option field maps to the flag or argument of the same name in the [Command Reference](command-reference.md), and zero values fall back to the CLI defaults. Two fields have no flag equivalent:
@@ -50,7 +51,43 @@ func main() {
 }
 ```
 
-`result.Existing` is true when a running helper already covered the request and nothing new was created, matching the CLI's [idempotency](command-reference.md#idempotency) behavior.
+`result.Existing` is true when a running helper already covered the request and nothing new was created, matching the CLI's [idempotency](command-reference.md#idempotency) behavior. A covering helper that can no longer reach its target is replaced instead, and `Existing` is false.
+
+## Per-port addresses and logging
+
+`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`.
+
+```go
+result, err := portforward.Forward(ctx, portforward.Options{
+    Target:    "my-app",
+    Ports:     []string{"127.0.0.1:8080:80", "0.0.0.0:5432:5432", "[::1]::9000"},
+    Detach:    true,
+    LogDriver: "json-file",
+    LogOpts:   map[string]string{"max-size": "10m"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+for _, p := range result.Ports {
+    fmt.Printf("%v:%d -> %d/%s\n", p.Addresses, p.Local, p.Remote, p.Protocol)
+}
+```
+
+## Finding stale helpers
+
+`List` returns helper containers along with the network and address each one dials. `Stale` is true when a helper can no longer reach its target, for example after a target on the default `bridge` network restarted with a new IP. See [`port-forward list`](command-reference.md#port-forward-list) for the exact rules.
+
+```go
+helpers, err := portforward.List(ctx, portforward.ListOptions{Stale: true})
+if err != nil {
+    log.Fatal(err)
+}
+for _, h := range helpers {
+    fmt.Printf("%s dials %s on %s: %s\n", h.Name, h.TargetAddress, h.TargetNetwork, h.StaleReason)
+}
+```
+
+To fix them, call `Forward` again with the same options, which replaces a stale helper that covers the requested ports, or remove them with `Cleanup` and `CleanupOptions{Stale: true}`.
 
 ## Forward until canceled
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dokku/docker-port-forward/internal"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )
 
@@ -19,10 +20,14 @@ type Options struct {
 	// Target is the TARGET argument: container/<id-or-name>,
 	// service/<name>, or a bare name.
 	Target string
-	// Ports are the [LOCAL_PORT:]REMOTE_PORT[/udp] arguments. When empty,
+	// Ports are the port spec arguments, in `docker run -p` form:
+	// [[ADDRESS:]LOCAL_PORT:]REMOTE_PORT[/udp]. ADDRESS is an IP literal
+	// (IPv6 in brackets) or "localhost" and binds that port only there;
+	// ADDRESS::REMOTE_PORT auto-allocates the local port. When empty,
 	// listening ports are detected in the target.
 	Ports []string
-	// Addresses mirrors --address. Defaults to ["localhost"].
+	// Addresses mirrors --address: the addresses to bind ports whose spec
+	// has no ADDRESS. Defaults to ["localhost"].
 	Addresses []string
 	// Detach mirrors --detach. When true, Forward returns once the helper
 	// is running and the helper keeps running until removed with Cleanup.
@@ -37,6 +42,12 @@ type Options struct {
 	// doesn't allow together with a restart policy, so any value other than
 	// "" or "no" without Detach is an error.
 	RestartPolicy string
+	// LogDriver mirrors --log-driver: the helper container's logging
+	// driver. Empty uses the daemon default.
+	LogDriver string
+	// LogOpts mirrors --log-opt: options for LogDriver. Not allowed with
+	// the "none" driver.
+	LogOpts map[string]string
 	// RunningTimeout mirrors --container-running-timeout. Defaults to
 	// DefaultRunningTimeout.
 	RunningTimeout time.Duration
@@ -76,6 +87,8 @@ type Port struct {
 	Local    int
 	Remote   int
 	Protocol string // "tcp" or "udp"
+	// Addresses are the host addresses Local is bound on.
+	Addresses []string
 }
 
 // Result describes the helper container serving the forward. In attached
@@ -116,6 +129,10 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 
 	restartPolicy, err := internal.ParseRestartPolicy(opts.RestartPolicy, opts.Detach)
 	if err != nil {
+		return Result{}, err
+	}
+
+	if err := internal.ValidateLogConfig(opts.LogDriver, opts.LogOpts); err != nil {
 		return Result{}, err
 	}
 
@@ -177,6 +194,7 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 		RunningTimeout: opts.RunningTimeout,
 		Detach:         opts.Detach,
 		RestartPolicy:  restartPolicy,
+		LogConfig:      container.LogConfig{Type: opts.LogDriver, Config: opts.LogOpts},
 		Name:           opts.Name,
 		ExtraLabels:    opts.Labels,
 		UDPTimeout:     opts.UDPTimeout,
@@ -189,9 +207,10 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 	ports := make([]Port, 0, len(result.Pairs))
 	for _, p := range result.Pairs {
 		ports = append(ports, Port{
-			Local:    p.LocalPort,
-			Remote:   p.RemotePort,
-			Protocol: string(internal.NormalizeProtocol(p.Protocol)),
+			Local:     p.LocalPort,
+			Remote:    p.RemotePort,
+			Protocol:  string(internal.NormalizeProtocol(p.Protocol)),
+			Addresses: internal.PairAddresses(p, opts.Addresses),
 		})
 	}
 	return Result{

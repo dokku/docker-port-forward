@@ -25,6 +25,8 @@ type PortForwardCommand struct {
 	extraLabels      []string
 	files            []string
 	helperImage      string
+	logDriver        string
+	logOpts          []string
 	name             string
 	profiles         []string
 	projectDirectory string
@@ -61,6 +63,8 @@ func (c *PortForwardCommand) Examples() map[string]string {
 		"Forward to a Compose service":                     fmt.Sprintf("%s %s service/web 8080:80", appName, c.Name()),
 		"Bind all interfaces":                              fmt.Sprintf("%s %s --address 0.0.0.0 my-container 8080:80", appName, c.Name()),
 		"Add extra labels to the helper":                   fmt.Sprintf("%s %s --label team=backend --label env=dev my-container 8080:80", appName, c.Name()),
+		"Bind each port on its own address":                fmt.Sprintf("%s %s my-container 127.0.0.1:8080:80 0.0.0.0:5432:5432", appName, c.Name()),
+		"Configure the helper's logging":                   fmt.Sprintf("%s %s --detach --log-driver json-file --log-opt max-size=10m my-container 8080:80", appName, c.Name()),
 		"Forward a UDP port":                               fmt.Sprintf("%s %s my-container 53:53/udp", appName, c.Name()),
 		"Mix TCP and UDP in one command":                   fmt.Sprintf("%s %s my-container 8080:80 53:53/udp", appName, c.Name()),
 	}
@@ -76,7 +80,7 @@ func (c *PortForwardCommand) Arguments() []command.Argument {
 		},
 		{
 			Name:        "ports",
-			Description: "zero or more port specs in [LOCAL_PORT:]REMOTE_PORT form; omit to auto-detect",
+			Description: "zero or more port specs in [[ADDRESS:]LOCAL_PORT:]REMOTE_PORT[/udp] form; omit to auto-detect",
 			Optional:    true,
 			Type:        command.ArgumentList,
 		},
@@ -100,6 +104,8 @@ func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f.StringSliceVar(&c.extraLabels, "label", []string{}, "extra labels to add to the helper container, in key=value form; may be repeated")
 	f.StringSliceVarP(&c.files, "file", "f", []string{}, "one or more paths to Compose files (for service resolution)")
 	f.StringVar(&c.helperImage, "helper-image", portforward.DefaultHelperImage, "image used for the sidecar helper container")
+	f.StringVar(&c.logDriver, "log-driver", "", "Logging driver for the container")
+	f.StringArrayVar(&c.logOpts, "log-opt", []string{}, "Log driver options")
 	f.StringVar(&c.name, "name", "", "name to assign to the helper container; auto-generated when omitted")
 	f.StringSliceVar(&c.profiles, "profile", []string{}, "one or more compose profiles to enable")
 	f.StringVar(&c.projectDirectory, "project-directory", "", "the path to the compose project directory")
@@ -121,6 +127,8 @@ func (c *PortForwardCommand) AutocompleteFlags() complete.Flags {
 			"--file":                      complete.PredictFiles("*"),
 			"--helper-image":              complete.PredictAnything,
 			"--label":                     complete.PredictAnything,
+			"--log-driver":                complete.PredictAnything,
+			"--log-opt":                   complete.PredictAnything,
 			"--name":                      complete.PredictAnything,
 			"--profile":                   complete.PredictAnything,
 			"--project-directory":         complete.PredictDirs("*"),
@@ -174,6 +182,8 @@ func (c *PortForwardCommand) Run(args []string) int {
 		Files:            c.files,
 		HelperImage:      c.helperImage,
 		Labels:           extraLabels,
+		LogDriver:        c.logDriver,
+		LogOpts:          parseLogOptFlags(c.logOpts),
 		Name:             c.name,
 		Profiles:         c.profiles,
 		ProjectDirectory: c.projectDirectory,
@@ -187,6 +197,21 @@ func (c *PortForwardCommand) Run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// parseLogOptFlags converts --log-opt key=value flags to a map the way
+// `docker container create --log-opt` does: each value is cut on the first
+// "=", and an entry without "=" maps to an empty value.
+func parseLogOptFlags(in []string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for _, entry := range in {
+		k, v, _ := strings.Cut(entry, "=")
+		out[k] = v
+	}
+	return out
 }
 
 // parseLabelFlags parses --label key=value flags into a map, returning a clear
