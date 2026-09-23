@@ -695,3 +695,289 @@ func allocatePorts(t *testing.T, n int) []int {
 // Compile-time guard to make sure we pulled in all the packages we actually
 // use in the build tagged above. Prevents accidental removal.
 var _ = dockerClient.IsErrConnectionFailed
+
+// ---------------------------------------------------------------------------
+// Ambassador: detached helpers survive a target restart
+// ---------------------------------------------------------------------------
+
+// TestIntegration_DetachedForwardSurvivesTargetRestart puts the target on a
+// user-defined network, forwards to it detached, then restarts the target so
+// it comes back with a different IP. The helper addresses the target by
+// container name, so the forward keeps working.
+func TestIntegration_DetachedForwardSurvivesTargetRestart(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+
+	raw, err := dockerClient.NewClientWithOpts(dockerClient.FromEnv, dockerClient.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatalf("failed to create raw Docker client: %v", err)
+	}
+	defer raw.Close()
+
+	netName := integrationPrefix + "net-" + randomHex(4)
+	if _, err := raw.NetworkCreate(ctx, netName, dockerClient.NetworkCreateOptions{
+		Labels: map[string]string{"dpf-integration": "true"},
+	}); err != nil {
+		t.Fatalf("failed to create network: %v", err)
+	}
+	t.Cleanup(func() {
+		// Containers are removed by setupIntegration's cleanup, which runs
+		// after this one (LIFO); remove them first so the network is free.
+		cleanupByLabel(t, ctx, cli, "dpf-integration=true")
+		_, _ = raw.NetworkRemove(ctx, netName, dockerClient.NetworkRemoveOptions{})
+	})
+
+	startOnNetwork := func(name string) string {
+		resp, err := cli.ContainerCreate(ctx,
+			&container.Config{
+				Image:  integrationNginxImage,
+				Labels: map[string]string{"dpf-integration": "true"},
+			},
+			&container.HostConfig{NetworkMode: container.NetworkMode(netName)},
+			&network.NetworkingConfig{},
+			nil,
+			name,
+		)
+		if err != nil {
+			t.Fatalf("failed to create %s: %v", name, err)
+		}
+		if err := cli.ContainerStart(ctx, resp.ID, dockerClient.ContainerStartOptions{}); err != nil {
+			t.Fatalf("failed to start %s: %v", name, err)
+		}
+		return resp.ID
+	}
+	targetIP := func(id string) string {
+		info, err := cli.ContainerInspect(ctx, id)
+		if err != nil {
+			t.Fatalf("failed to inspect %s: %v", id, err)
+		}
+		return info.NetworkSettings.Networks[netName].IPAddress.String()
+	}
+
+	targetName := integrationPrefix + "amb-" + randomHex(4)
+	targetID := startOnNetwork(targetName)
+	originalIP := targetIP(targetID)
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+
+	result, err := StartForward(ctx, ForwardInput{
+		Client:      cli,
+		Target:      ResolvedTarget{ContainerID: targetID, ContainerName: targetName},
+		Pairs:       []PortPair{{LocalPort: port, RemotePort: 80}},
+		Addresses:   []string{"127.0.0.1"},
+		Detach:      true,
+		Name:        integrationPrefix + "amb-helper-" + randomHex(4),
+		ExtraLabels: map[string]string{"dpf-integration": "true"},
+		Logger:      &testLogger{t: t},
+	})
+	if err != nil {
+		t.Fatalf("StartForward returned error: %v", err)
+	}
+
+	helper, err := cli.ContainerInspect(ctx, result.HelperID)
+	if err != nil {
+		t.Fatalf("failed to inspect helper: %v", err)
+	}
+	if helper.HostConfig.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+		t.Fatalf("expected unless-stopped restart policy, got %q", helper.HostConfig.RestartPolicy.Name)
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	resp := httpGetWithRetry(t, url, 10*time.Second)
+	resp.Body.Close()
+
+	// Stop the target, occupy its old IP with another container, and start
+	// the target again so it is assigned a new IP.
+	stopTimeout := 1
+	if err := cli.ContainerStop(ctx, targetID, dockerClient.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
+		t.Fatalf("failed to stop target: %v", err)
+	}
+	startOnNetwork(integrationPrefix + "squatter-" + randomHex(4))
+	if err := cli.ContainerStart(ctx, targetID, dockerClient.ContainerStartOptions{}); err != nil {
+		t.Fatalf("failed to restart target: %v", err)
+	}
+	if newIP := targetIP(targetID); newIP == originalIP {
+		t.Logf("target kept IP %s after restart; test still checks reachability", newIP)
+	}
+
+	resp = httpGetWithRetry(t, url, 15*time.Second)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 after target restart, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bridge IP drift: labels, CheckHelper, and self-heal on re-run
+// ---------------------------------------------------------------------------
+
+// TestIntegration_BridgeDriftIsDetectedAndReplaced forwards to a target on
+// the default bridge, restarts the target so it gets a new IP, and checks
+// that CheckHelper reports the helper stale and that re-running StartForward
+// replaces it with one that works.
+func TestIntegration_BridgeDriftIsDetectedAndReplaced(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+	targetID := startNginxTarget(t, ctx, cli)
+
+	bridgeIP := func() string {
+		info, err := cli.ContainerInspect(ctx, targetID)
+		if err != nil {
+			t.Fatalf("failed to inspect target: %v", err)
+		}
+		return info.NetworkSettings.Networks["bridge"].IPAddress.String()
+	}
+	originalIP := bridgeIP()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+
+	forward := func() ForwardResult {
+		result, err := StartForward(ctx, ForwardInput{
+			Client:      cli,
+			Target:      ResolvedTarget{ContainerID: targetID, ContainerName: "nginx"},
+			Pairs:       []PortPair{{LocalPort: port, RemotePort: 80}},
+			Addresses:   []string{"127.0.0.1"},
+			Detach:      true,
+			ExtraLabels: map[string]string{"dpf-integration": "true"},
+			Logger:      &testLogger{t: t},
+		})
+		if err != nil {
+			t.Fatalf("StartForward returned error: %v", err)
+		}
+		return result
+	}
+
+	first := forward()
+	helper, err := cli.ContainerInspect(ctx, first.HelperID)
+	if err != nil {
+		t.Fatalf("failed to inspect helper: %v", err)
+	}
+	if helper.Config.Labels[LabelTargetNetwork] != "bridge" || helper.Config.Labels[LabelTargetAddress] != originalIP {
+		t.Fatalf("unexpected target labels: %v", helper.Config.Labels)
+	}
+
+	// Stop the target, occupy its IP with another container, and start the
+	// target again so it gets a new IP.
+	stopTimeout := 1
+	if err := cli.ContainerStop(ctx, targetID, dockerClient.ContainerStopOptions{Timeout: &stopTimeout}); err != nil {
+		t.Fatalf("failed to stop target: %v", err)
+	}
+	startNginxTarget(t, ctx, cli)
+	if err := cli.ContainerStart(ctx, targetID, dockerClient.ContainerStartOptions{}); err != nil {
+		t.Fatalf("failed to restart target: %v", err)
+	}
+	if bridgeIP() == originalIP {
+		t.Skipf("target kept IP %s after restart; cannot exercise drift", originalIP)
+	}
+
+	helpers, err := ListHelpers(ctx, cli, targetID)
+	if err != nil || len(helpers) != 1 {
+		t.Fatalf("expected one helper, got %d (err=%v)", len(helpers), err)
+	}
+	stale, reason, err := CheckHelper(ctx, cli, helpers[0])
+	if err != nil {
+		t.Fatalf("CheckHelper returned error: %v", err)
+	}
+	if !stale || !strings.Contains(reason, "target IP changed") {
+		t.Fatalf("expected helper to be stale, got stale=%v reason=%q", stale, reason)
+	}
+
+	second := forward()
+	if second.Existing || second.HelperID == first.HelperID {
+		t.Fatalf("expected a replacement helper, got %+v", second)
+	}
+	if _, err := cli.ContainerInspect(ctx, first.HelperID); err == nil {
+		t.Fatal("expected the stale helper to be removed")
+	}
+
+	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", port), 10*time.Second)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 through the replacement helper, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-port bind addresses
+// ---------------------------------------------------------------------------
+
+func TestIntegration_PerPortAddresses(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+	targetID := startNginxTarget(t, ctx, cli)
+
+	result, err := StartForward(ctx, ForwardInput{
+		Client: cli,
+		Target: ResolvedTarget{ContainerID: targetID, ContainerName: "nginx"},
+		Pairs: []PortPair{
+			{Address: "127.0.0.1", LocalPort: 0, RemotePort: 80},
+			{Address: "0.0.0.0", LocalPort: 0, RemotePort: 8080},
+		},
+		Addresses:   []string{"localhost"},
+		Detach:      true,
+		ExtraLabels: map[string]string{"dpf-integration": "true"},
+		Logger:      &testLogger{t: t},
+	})
+	if err != nil {
+		t.Fatalf("StartForward returned error: %v", err)
+	}
+
+	helper, err := cli.ContainerInspect(ctx, result.HelperID)
+	if err != nil {
+		t.Fatalf("failed to inspect helper: %v", err)
+	}
+	for port, bindings := range helper.HostConfig.PortBindings {
+		if len(bindings) != 1 {
+			t.Fatalf("expected exactly one binding for %s, got %+v", port, bindings)
+		}
+		want := map[uint16]string{80: "127.0.0.1", 8080: "0.0.0.0"}[port.Num()]
+		if bindings[0].HostIP.String() != want {
+			t.Fatalf("binding for %s: got %s, want %s", port, bindings[0].HostIP, want)
+		}
+	}
+
+	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", result.Pairs[0].LocalPort), 10*time.Second)
+	resp.Body.Close()
+}
+
+// ---------------------------------------------------------------------------
+// All-interface binds
+// ---------------------------------------------------------------------------
+
+func TestIntegration_AllInterfacesBinding(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+	targetID := startNginxTarget(t, ctx, cli)
+
+	result, err := StartForward(ctx, ForwardInput{
+		Client:      cli,
+		Target:      ResolvedTarget{ContainerID: targetID, ContainerName: "nginx"},
+		Pairs:       []PortPair{{Address: AllInterfaces, LocalPort: 0, RemotePort: 80}},
+		Addresses:   []string{"localhost"},
+		Detach:      true,
+		ExtraLabels: map[string]string{"dpf-integration": "true"},
+		Logger:      &testLogger{t: t},
+	})
+	if err != nil {
+		t.Fatalf("StartForward returned error: %v", err)
+	}
+
+	helper, err := cli.ContainerInspect(ctx, result.HelperID)
+	if err != nil {
+		t.Fatalf("failed to inspect helper: %v", err)
+	}
+	for port, bindings := range helper.HostConfig.PortBindings {
+		if len(bindings) != 1 || bindings[0].HostIP.IsValid() {
+			t.Fatalf("expected one zero-HostIP binding for %s, got %+v", port, bindings)
+		}
+	}
+
+	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", result.Pairs[0].LocalPort), 10*time.Second)
+	resp.Body.Close()
+}

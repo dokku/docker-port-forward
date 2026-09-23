@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -126,15 +127,21 @@ func TestBuildHelperContainerConfig(t *testing.T) {
 		{LocalPort: 9090, RemotePort: 80},
 		{LocalPort: 5432, RemotePort: 5432},
 	}
-	cfg, hostCfg := buildHelperContainerConfig(
-		"target-sha", "alpine/socat", pairs,
-		[]string{"127.0.0.1", "::1"},
-		"172.17.0.5",
-		"port-forward-demo-1234", "sess-xyz",
-		map[string]string{"app": "demo"},
-		true, // detach
-		DefaultUDPTimeout,
-	)
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "target-sha",
+		TargetName:    "demo",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs:         pairs,
+		Addresses:     []string{"127.0.0.1", "::1"},
+		Name:          "port-forward-demo-1234",
+		Session:       "sess-xyz",
+		ExtraLabels:   map[string]string{"app": "demo"},
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		UDPTimeout:    DefaultUDPTimeout,
+	})
 
 	if cfg.Image != "alpine/socat" {
 		t.Fatalf("unexpected image: %q", cfg.Image)
@@ -157,7 +164,7 @@ func TestBuildHelperContainerConfig(t *testing.T) {
 		t.Fatalf("expected trap to propagate signals: %s", shCmd)
 	}
 
-	for _, key := range []string{LabelPortForward, LabelTarget, LabelSession, LabelName, LabelPorts, LabelAddresses, "app"} {
+	for _, key := range []string{LabelPortForward, LabelTarget, LabelSession, LabelName, LabelPorts, LabelAddresses, LabelBindings, LabelTargetName, LabelTargetNetwork, LabelTargetAddress, "app"} {
 		if _, ok := cfg.Labels[key]; !ok {
 			t.Fatalf("missing label %q", key)
 		}
@@ -170,6 +177,15 @@ func TestBuildHelperContainerConfig(t *testing.T) {
 	}
 	if cfg.Labels["app"] != "demo" {
 		t.Fatalf("expected extra label app=demo")
+	}
+	if cfg.Labels[LabelTargetNetwork] != "bridge" || cfg.Labels[LabelTargetAddress] != "172.17.0.5" || cfg.Labels[LabelTargetName] != "demo" {
+		t.Fatalf("unexpected target labels: %v", cfg.Labels)
+	}
+	if cfg.Labels[LabelAddresses] != "127.0.0.1,::1" {
+		t.Fatalf("unexpected addresses label: %q", cfg.Labels[LabelAddresses])
+	}
+	if hostCfg.NetworkMode != "bridge" {
+		t.Fatalf("expected network mode bridge, got %q", hostCfg.NetworkMode)
 	}
 
 	// Port bindings: same remote has multiple bindings (for 8080 and 9090),
@@ -186,20 +202,74 @@ func TestBuildHelperContainerConfig(t *testing.T) {
 	if hostCfg.AutoRemove {
 		t.Fatal("detached helpers must not use AutoRemove")
 	}
+	if hostCfg.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+		t.Fatalf("expected unless-stopped restart policy, got %q", hostCfg.RestartPolicy.Name)
+	}
 }
 
 func TestBuildHelperContainerConfig_AttachedAutoRemoves(t *testing.T) {
-	cfg, hostCfg := buildHelperContainerConfig(
-		"tgt", "alpine/socat",
-		[]PortPair{{LocalPort: 8080, RemotePort: 80}},
-		[]string{"127.0.0.1"}, "172.17.0.2",
-		"name", "sess", nil,
-		false, // attached
-		DefaultUDPTimeout,
-	)
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.2",
+		Image:         "alpine/socat",
+		Pairs:         []PortPair{{LocalPort: 8080, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        false,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyAlways},
+		UDPTimeout:    DefaultUDPTimeout,
+	})
 	_ = cfg
 	if !hostCfg.AutoRemove {
 		t.Fatal("attached helpers should set AutoRemove=true")
+	}
+	if hostCfg.RestartPolicy.Name != container.RestartPolicyDisabled {
+		t.Fatalf("attached helpers must use restart policy \"no\", got %q", hostCfg.RestartPolicy.Name)
+	}
+}
+
+func TestBuildHelperContainerConfig_DetachedUsesRestartPolicy(t *testing.T) {
+	_, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "my-net",
+		TargetAddress: "target",
+		Image:         "alpine/socat",
+		Pairs:         []PortPair{{LocalPort: 8080, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyOnFailure, MaximumRetryCount: 3},
+		LogConfig:     container.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m"}},
+		UDPTimeout:    DefaultUDPTimeout,
+	})
+	if hostCfg.RestartPolicy.Name != container.RestartPolicyOnFailure || hostCfg.RestartPolicy.MaximumRetryCount != 3 {
+		t.Fatalf("unexpected restart policy: %+v", hostCfg.RestartPolicy)
+	}
+	if hostCfg.LogConfig.Type != "json-file" || hostCfg.LogConfig.Config["max-size"] != "10m" {
+		t.Fatalf("unexpected log config: %+v", hostCfg.LogConfig)
+	}
+}
+
+func TestBuildHelperContainerConfig_TargetsByName(t *testing.T) {
+	cfg, _ := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "my-net",
+		TargetAddress: "my-target",
+		Image:         "alpine/socat",
+		Pairs:         []PortPair{{LocalPort: 8080, RemotePort: 80}, {LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP}},
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		UDPTimeout:    DefaultUDPTimeout,
+	})
+	shCmd := cfg.Cmd[0]
+	if !strings.Contains(shCmd, "TCP:my-target:80") || !strings.Contains(shCmd, "UDP:my-target:53") {
+		t.Fatalf("expected socat to target the container name: %s", shCmd)
 	}
 }
 
@@ -208,13 +278,19 @@ func TestBuildHelperContainerConfig_UDPSpawnsTimedSocat(t *testing.T) {
 		{LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
 		{LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP},
 	}
-	cfg, hostCfg := buildHelperContainerConfig(
-		"target-sha", "alpine/socat", pairs,
-		[]string{"127.0.0.1"}, "172.17.0.5",
-		"my-helper", "sess", nil,
-		true,
-		90*time.Second,
-	)
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "target-sha",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs:         pairs,
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "my-helper",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		UDPTimeout:    90 * time.Second,
+	})
 
 	shCmd := cfg.Cmd[0]
 	if !strings.Contains(shCmd, "socat TCP-LISTEN:80,fork,reuseaddr TCP:172.17.0.5:80") {
@@ -244,12 +320,19 @@ func TestBuildHelperContainerConfig_UDPPortsLabelRoundTrip(t *testing.T) {
 		{LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP},
 		{LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
 	}
-	cfg, _ := buildHelperContainerConfig(
-		"tgt", "alpine/socat", pairs,
-		[]string{"127.0.0.1"}, "172.17.0.5",
-		"name", "sess", nil,
-		true, DefaultUDPTimeout,
-	)
+	cfg, _ := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs:         pairs,
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		UDPTimeout:    DefaultUDPTimeout,
+	})
 	decoded, err := DecodePortPairs(cfg.Labels[LabelPorts])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -261,6 +344,43 @@ func TestBuildHelperContainerConfig_UDPPortsLabelRoundTrip(t *testing.T) {
 		if decoded[i] != pairs[i] {
 			t.Fatalf("pair %d round-trip mismatch: got %+v, want %+v", i, decoded[i], pairs[i])
 		}
+	}
+}
+
+func TestPickTargetNetwork_UserDefinedUsesContainerName(t *testing.T) {
+	info := container.InspectResponse{
+		Name: "/my-target",
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: netip.MustParseAddr("172.17.0.5")},
+				"my-net": {IPAddress: netip.MustParseAddr("10.0.0.5")},
+			},
+		},
+	}
+	name, addr, err := pickTargetNetwork(info)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "my-net" || addr != "my-target" {
+		t.Fatalf("expected my-net/my-target, got %q %q", name, addr)
+	}
+}
+
+func TestPickTargetNetwork_BridgeUsesIPEvenWithName(t *testing.T) {
+	info := container.InspectResponse{
+		Name: "/my-target",
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge": {IPAddress: netip.MustParseAddr("172.17.0.5")},
+			},
+		},
+	}
+	name, addr, err := pickTargetNetwork(info)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "bridge" || addr != "172.17.0.5" {
+		t.Fatalf("got %q %q", name, addr)
 	}
 }
 
@@ -486,7 +606,7 @@ func TestResolveAutoPorts_AssignsNonZero(t *testing.T) {
 	pairs, err := resolveAutoPorts([]PortPair{
 		{LocalPort: 0, RemotePort: 80},
 		{LocalPort: 8080, RemotePort: 8080},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -495,6 +615,109 @@ func TestResolveAutoPorts_AssignsNonZero(t *testing.T) {
 	}
 	if pairs[1].LocalPort != 8080 {
 		t.Fatalf("explicit port mangled: %d", pairs[1].LocalPort)
+	}
+}
+
+func TestResolveAutoPorts_KeepsAddressAndAllocatesOnIt(t *testing.T) {
+	pairs, err := resolveAutoPorts([]PortPair{
+		{Address: "127.0.0.1", LocalPort: 0, RemotePort: 80},
+		{Address: "127.0.0.1", LocalPort: 0, RemotePort: 53, Protocol: ProtocolUDP},
+	}, []string{"192.0.2.1"}) // unassignable default: allocation must use the pair's address
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range pairs {
+		if p.Address != "127.0.0.1" || p.LocalPort == 0 {
+			t.Fatalf("unexpected pair: %+v", p)
+		}
+	}
+}
+
+func TestPairAddresses(t *testing.T) {
+	defaults := []string{"localhost"}
+	if got := PairAddresses(PortPair{RemotePort: 80}, defaults); len(got) != 2 || got[0] != "127.0.0.1" || got[1] != "::1" {
+		t.Fatalf("default addresses: got %v", got)
+	}
+	if got := PairAddresses(PortPair{Address: "0.0.0.0", RemotePort: 80}, defaults); len(got) != 1 || got[0] != "0.0.0.0" {
+		t.Fatalf("pair address: got %v", got)
+	}
+}
+
+func TestBuildHelperContainerConfig_PerPairAddresses(t *testing.T) {
+	_, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs: []PortPair{
+			{Address: "0.0.0.0", LocalPort: 8080, RemotePort: 80},
+			{LocalPort: 5432, RemotePort: 5432},
+		},
+		Addresses:     []string{"127.0.0.1"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+	})
+	for port, bindings := range hostCfg.PortBindings {
+		if len(bindings) != 1 {
+			t.Fatalf("expected one binding for %s, got %+v", port, bindings)
+		}
+		switch port.Num() {
+		case 80:
+			if bindings[0].HostIP.String() != "0.0.0.0" || bindings[0].HostPort != "8080" {
+				t.Fatalf("unexpected binding for 80: %+v", bindings[0])
+			}
+		case 5432:
+			if bindings[0].HostIP.String() != "127.0.0.1" || bindings[0].HostPort != "5432" {
+				t.Fatalf("unexpected binding for 5432: %+v", bindings[0])
+			}
+		}
+	}
+}
+
+func TestPreflightHostPorts_UsesPairAddress(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	// The default address is busy, but the pair binds elsewhere.
+	if err := preflightHostPorts([]string{"127.0.0.1"}, []PortPair{{Address: "::1", LocalPort: port, RemotePort: 80}}); err != nil && !isIPv6Unavailable(err) {
+		t.Fatalf("pair address should be checked instead of defaults: %v", err)
+	}
+	if err := preflightHostPorts(nil, []PortPair{{Address: "127.0.0.1", LocalPort: port, RemotePort: 80}}); err == nil {
+		t.Fatal("expected conflict on the pair's own address")
+	}
+}
+
+func TestEncodeDecodeBindings(t *testing.T) {
+	pairs := []PortPair{
+		{Address: "0.0.0.0", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP},
+		{LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+	}
+	encoded := EncodeBindings(pairs, []string{"localhost"})
+	if encoded != "0.0.0.0:8080:80,127.0.0.1:53:53/udp,[::1]:53:53/udp" {
+		t.Fatalf("unexpected encoding: %q", encoded)
+	}
+	decoded := DecodeBindings(encoded)
+	want := []PortPair{
+		{Address: "0.0.0.0", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP},
+		{Address: "127.0.0.1", LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+		{Address: "::1", LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+	}
+	if len(decoded) != len(want) {
+		t.Fatalf("got %+v, want %+v", decoded, want)
+	}
+	for i := range want {
+		if decoded[i] != want[i] {
+			t.Fatalf("binding %d: got %+v, want %+v", i, decoded[i], want[i])
+		}
+	}
+	if DecodeBindings("") != nil {
+		t.Fatal("expected nil for empty label")
 	}
 }
 
@@ -791,6 +1014,9 @@ func TestStartForward_DetachedCreatesHelper(t *testing.T) {
 			if hostConfig.AutoRemove {
 				t.Fatal("detached helper should not auto-remove")
 			}
+			if hostConfig.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+				t.Fatalf("expected default restart policy unless-stopped, got %q", hostConfig.RestartPolicy.Name)
+			}
 			if hostConfig.NetworkMode != "bridge" {
 				t.Fatalf("expected network 'bridge' as sole option, got %q", hostConfig.NetworkMode)
 			}
@@ -805,10 +1031,11 @@ func TestStartForward_DetachedCreatesHelper(t *testing.T) {
 		},
 	}
 
+	requested := []PortPair{{LocalPort: 0, RemotePort: 80}}
 	result, err := StartForward(context.Background(), ForwardInput{
 		Client:      cli,
 		Target:      ResolvedTarget{ContainerID: "target-sha", ContainerName: "target"},
-		Pairs:       []PortPair{{LocalPort: 0, RemotePort: 80}},
+		Pairs:       requested,
 		Addresses:   []string{"127.0.0.1"},
 		Detach:      true,
 		Name:        "my-name",
@@ -830,6 +1057,9 @@ func TestStartForward_DetachedCreatesHelper(t *testing.T) {
 	// Auto-allocated local port should be resolved to a non-zero value.
 	if result.Pairs[0].LocalPort == 0 {
 		t.Fatal("auto-local port should have been resolved")
+	}
+	if requested[0].Protocol != "" || requested[0].LocalPort != 0 {
+		t.Fatalf("caller's pairs were mutated: %+v", requested[0])
 	}
 }
 
@@ -867,5 +1097,258 @@ func TestStartForward_PreflightFailsOnBusyPort(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not available") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStartForward_SkipPreflightAllowsBusyPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	busyPort := l.Addr().(*net.TCPAddr).Port
+
+	created, started := false, false
+	cli := &mockDockerClient{
+		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
+			return newInspectResponseForNetwork(id), nil
+		},
+		containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {
+			created = true
+			return container.CreateResponse{ID: "new-helper"}, nil
+		},
+		containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+			started = true
+			return nil
+		},
+	}
+
+	_, err = StartForward(context.Background(), ForwardInput{
+		Client:        cli,
+		Target:        ResolvedTarget{ContainerID: "target-sha"},
+		Pairs:         []PortPair{{LocalPort: busyPort, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Detach:        true,
+		SkipPreflight: true,
+		Logger:        &captureLogger{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !created || !started {
+		t.Fatalf("expected helper created and started (created=%v started=%v)", created, started)
+	}
+}
+
+func TestStartWithPortRetry(t *testing.T) {
+	allocated := errors.New("Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:80 failed: port is already allocated")
+
+	t.Run("retries port conflicts until success", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				if calls < 3 {
+					return allocated
+				}
+				return nil
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 5*time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if calls != 3 {
+			t.Fatalf("expected 3 start attempts, got %d", calls)
+		}
+	})
+
+	t.Run("no retry when disabled", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				return allocated
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", false, 5*time.Second); err == nil {
+			t.Fatal("expected error")
+		}
+		if calls != 1 {
+			t.Fatalf("expected 1 start attempt, got %d", calls)
+		}
+	})
+
+	t.Run("no retry for unrelated errors", func(t *testing.T) {
+		calls := 0
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				calls++
+				return errors.New("no such image")
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 5*time.Second); err == nil {
+			t.Fatal("expected error")
+		}
+		if calls != 1 {
+			t.Fatalf("expected 1 start attempt, got %d", calls)
+		}
+	})
+
+	t.Run("gives up at the deadline", func(t *testing.T) {
+		cli := &mockDockerClient{
+			containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+				return errors.New("listen tcp4 0.0.0.0:80: bind: address already in use")
+			},
+		}
+		if err := startWithPortRetry(context.Background(), cli, "id", true, 300*time.Millisecond); err == nil {
+			t.Fatal("expected error after timeout")
+		}
+	})
+}
+
+func TestStartForward_SkipPreflightRetriesStartAfterReplacingStaleHelper(t *testing.T) {
+	port := freeTCPPort(t)
+	stale := helperFor("bridge", "172.17.0.9")
+	stale.Labels[LabelPorts] = fmt.Sprintf("%d:80", port)
+
+	removed := map[string]bool{}
+	startCalls := 0
+	cli := &mockDockerClient{
+		containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
+			if id == "target-sha" {
+				return targetOn("bridge", "172.17.0.5", true), nil
+			}
+			return container.InspectResponse{ID: id, State: &container.State{Running: true}}, nil
+		},
+		containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+			if removed[stale.ID] {
+				return nil, nil
+			}
+			return []container.Summary{stale}, nil
+		},
+		containerRemove: func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
+			removed[id] = true
+			return nil
+		},
+		containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "new-helper"}, nil
+		},
+		containerStart: func(ctx context.Context, id string, options dockerClient.ContainerStartOptions) error {
+			startCalls++
+			if startCalls == 1 {
+				return errors.New("port is already allocated")
+			}
+			return nil
+		},
+	}
+
+	result, err := StartForward(context.Background(), ForwardInput{
+		Client:        cli,
+		Target:        ResolvedTarget{ContainerID: "target-sha", ContainerName: "target"},
+		Pairs:         []PortPair{{LocalPort: port, RemotePort: 80}},
+		Addresses:     []string{"127.0.0.1"},
+		Detach:        true,
+		SkipPreflight: true,
+		Logger:        &captureLogger{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed[stale.ID] || startCalls != 2 || result.HelperID != "new-helper" {
+		t.Fatalf("expected replacement with one retried start (removed=%v startCalls=%d result=%+v)", removed, startCalls, result)
+	}
+}
+
+func TestBuildHelperContainerConfig_AllInterfaces(t *testing.T) {
+	cfg, hostCfg := buildHelperContainerConfig(helperConfig{
+		TargetID:      "tgt",
+		TargetNetwork: "bridge",
+		TargetAddress: "172.17.0.5",
+		Image:         "alpine/socat",
+		Pairs:         []PortPair{{Address: AllInterfaces, LocalPort: 8080, RemotePort: 80}},
+		Addresses:     []string{"localhost"},
+		Name:          "name",
+		Session:       "sess",
+		Detach:        true,
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+	})
+	for port, bindings := range hostCfg.PortBindings {
+		if len(bindings) != 1 || bindings[0].HostIP.IsValid() || bindings[0].HostPort != "8080" {
+			t.Fatalf("expected one zero-HostIP binding for %s, got %+v", port, bindings)
+		}
+	}
+	if cfg.Labels[LabelAddresses] != "*" {
+		t.Fatalf("unexpected addresses label: %q", cfg.Labels[LabelAddresses])
+	}
+	if cfg.Labels[LabelBindings] != "*:8080:80" {
+		t.Fatalf("unexpected bindings label: %q", cfg.Labels[LabelBindings])
+	}
+}
+
+func TestPreflightHostPorts_AllInterfacesDetectsConflict(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("setup listen failed: %v", err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	if err := preflightHostPorts(nil, []PortPair{{Address: AllInterfaces, LocalPort: port, RemotePort: 80}}); err == nil {
+		t.Fatal("expected conflict on all interfaces")
+	}
+	if err := preflightHostPorts([]string{AllInterfaces}, []PortPair{{LocalPort: freeTCPPort(t), RemotePort: 80}}); err != nil {
+		t.Fatalf("unexpected error for a free port: %v", err)
+	}
+}
+
+func TestResolveAutoPorts_AllInterfaces(t *testing.T) {
+	pairs, err := resolveAutoPorts([]PortPair{
+		{Address: AllInterfaces, RemotePort: 80},
+		{RemotePort: 53, Protocol: ProtocolUDP},
+	}, []string{AllInterfaces})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, p := range pairs {
+		if p.LocalPort == 0 {
+			t.Fatalf("expected an allocated port: %+v", p)
+		}
+	}
+}
+
+func TestBuildHelperContainerConfig_TCPHalfCloseTimeout(t *testing.T) {
+	build := func(d time.Duration) string {
+		cfg, _ := buildHelperContainerConfig(helperConfig{
+			TargetID:      "tgt",
+			TargetNetwork: "bridge",
+			TargetAddress: "172.17.0.5",
+			Image:         "alpine/socat",
+			Pairs: []PortPair{
+				{LocalPort: 8080, RemotePort: 80},
+				{LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+			},
+			Addresses:           []string{"127.0.0.1"},
+			Name:                "name",
+			Session:             "sess",
+			Detach:              true,
+			RestartPolicy:       container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+			UDPTimeout:          DefaultUDPTimeout,
+			TCPHalfCloseTimeout: d,
+		})
+		return cfg.Cmd[0]
+	}
+
+	shCmd := build(100000000 * time.Second)
+	if !strings.Contains(shCmd, "socat -t 100000000 TCP-LISTEN:80,fork,reuseaddr TCP:172.17.0.5:80") {
+		t.Fatalf("expected -t on the TCP socat: %s", shCmd)
+	}
+	if !strings.Contains(shCmd, "socat -T 60 UDP-LISTEN:53") {
+		t.Fatalf("UDP socat should be unchanged: %s", shCmd)
+	}
+	if shCmd := build(1500 * time.Millisecond); !strings.Contains(shCmd, "socat -t 1.5 TCP-LISTEN:80") {
+		t.Fatalf("expected fractional -t: %s", shCmd)
+	}
+	if shCmd := build(0); strings.Contains(shCmd, " -t ") {
+		t.Fatalf("expected no -t when unset: %s", shCmd)
 	}
 }

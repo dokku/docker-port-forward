@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/dokku/docker-port-forward/internal"
+	"github.com/dokku/docker-port-forward/portforward"
 	"github.com/josegonzalez/cli-skeleton/command"
 	"github.com/posener/complete"
 	flag "github.com/spf13/pflag"
@@ -18,6 +17,7 @@ type PortForwardCleanupCommand struct {
 
 	dryRun bool
 	name   string
+	stale  bool
 	target string
 }
 
@@ -36,10 +36,11 @@ func (c *PortForwardCleanupCommand) Help() string {
 func (c *PortForwardCleanupCommand) Examples() map[string]string {
 	appName := os.Getenv("CLI_APP_NAME")
 	return map[string]string{
-		"Remove all stale helpers":                   fmt.Sprintf("%s %s", appName, c.Name()),
-		"Preview what would be removed":              fmt.Sprintf("%s %s --dry-run", appName, c.Name()),
-		"Remove only helpers for a specific target":  fmt.Sprintf("%s %s --target abc123", appName, c.Name()),
-		"Remove a specific helper by name":           fmt.Sprintf("%s %s --name port-forward-mydb-a9c2", appName, c.Name()),
+		"Remove all stale helpers":                     fmt.Sprintf("%s %s", appName, c.Name()),
+		"Preview what would be removed":                fmt.Sprintf("%s %s --dry-run", appName, c.Name()),
+		"Remove only helpers for a specific target":    fmt.Sprintf("%s %s --target abc123", appName, c.Name()),
+		"Remove a specific helper by name":             fmt.Sprintf("%s %s --name port-forward-mydb-a9c2", appName, c.Name()),
+		"Remove helpers that can't reach their target": fmt.Sprintf("%s %s --stale", appName, c.Name()),
 	}
 }
 
@@ -59,6 +60,7 @@ func (c *PortForwardCleanupCommand) FlagSet() *flag.FlagSet {
 	f := c.Meta.FlagSet(c.Name(), command.FlagSetClient)
 	f.BoolVar(&c.dryRun, "dry-run", false, "list helpers that would be removed without removing them")
 	f.StringVar(&c.name, "name", "", "only act on the helper with this container name")
+	f.BoolVar(&c.stale, "stale", false, "only act on helpers that can no longer reach their target")
 	f.StringVar(&c.target, "target", "", "only act on helpers for the given target container id or name")
 	return f
 }
@@ -69,6 +71,7 @@ func (c *PortForwardCleanupCommand) AutocompleteFlags() complete.Flags {
 		complete.Flags{
 			"--dry-run": complete.PredictNothing,
 			"--name":    complete.PredictAnything,
+			"--stale":   complete.PredictNothing,
 			"--target":  complete.PredictAnything,
 		},
 	)
@@ -83,101 +86,58 @@ func (c *PortForwardCleanupCommand) Run(args []string) int {
 		return 1
 	}
 
-	ctx := context.Background()
-
-	client, err := internal.NewDockerClient()
-	if err != nil {
-		c.Ui.Error(err.Error())
-		return 1
-	}
-	defer client.Close()
-
-	// Resolve filters. --name short-circuits to a single helper lookup;
-	// --target is used to narrow the label query.
-	var candidates []helperRow
-	if c.name != "" {
-		info, err := client.ContainerInspect(ctx, c.name)
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("error looking up helper %q: %v", c.name, err))
-			return 1
-		}
-		if info.Config == nil || info.Config.Labels[internal.LabelPortForward] != "true" {
-			c.Ui.Error(fmt.Sprintf("container %q is not a port-forward helper", c.name))
-			return 1
-		}
-		candidates = append(candidates, helperRow{
-			ID:     info.ID,
-			Name:   strings.TrimPrefix(info.Name, "/"),
-			Target: info.Config.Labels[internal.LabelTarget],
-			Ports:  info.Config.Labels[internal.LabelPorts],
-		})
-	} else {
-		targetID := ""
-		if c.target != "" {
-			info, err := client.ContainerInspect(ctx, c.target)
-			if err != nil {
-				c.Ui.Error(fmt.Sprintf("error resolving target %q: %v", c.target, err))
-				return 1
-			}
-			targetID = info.ID
-		}
-		helpers, err := internal.ListHelpers(ctx, client, targetID)
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("error listing helper containers: %v", err))
-			return 1
-		}
-		for _, h := range helpers {
-			name := ""
-			if len(h.Names) > 0 {
-				name = strings.TrimPrefix(h.Names[0], "/")
-			}
-			candidates = append(candidates, helperRow{
-				ID:     h.ID,
-				Name:   name,
-				Target: h.Labels[internal.LabelTarget],
-				Ports:  h.Labels[internal.LabelPorts],
-			})
-		}
-	}
-
-	if len(candidates) == 0 {
-		c.Ui.Info("No helper containers found.")
-		return 0
-	}
-
-	for _, row := range candidates {
-		c.Ui.Info(fmt.Sprintf("%s  name=%s target=%s ports=%s",
-			truncateID(row.ID), row.Name, truncateID(row.Target), row.Ports))
-	}
-
-	if c.dryRun {
-		c.Ui.Info(fmt.Sprintf("--dry-run: would remove %d helper container(s)", len(candidates)))
-		return 0
-	}
-
 	logger, ok := c.Ui.(*command.ZerologUi)
 	if !ok {
 		c.Ui.Error("UI is not a ZerologUi")
 		return 1
 	}
 
-	ids := make([]string, 0, len(candidates))
-	for _, h := range candidates {
-		ids = append(ids, h.ID)
+	result, err := portforward.Cleanup(context.Background(), portforward.CleanupOptions{
+		DryRun: c.dryRun,
+		Name:   c.name,
+		Stale:  c.stale,
+		Target: c.target,
+		Logger: logger,
+	})
+	if err != nil {
+		c.Ui.Error(err.Error())
+		return 1
 	}
-	removed := internal.RemoveHelpers(ctx, client, ids, logger)
-	c.Ui.Info(fmt.Sprintf("Removed %d of %d helper container(s).", removed, len(candidates)))
-	if removed != len(candidates) {
+
+	if len(result.Helpers) == 0 {
+		c.Ui.Info("No helper containers found.")
+		return 0
+	}
+
+	for _, h := range result.Helpers {
+		c.Ui.Info(formatHelperRow(h, false))
+	}
+
+	if c.dryRun {
+		c.Ui.Info(fmt.Sprintf("--dry-run: would remove %d helper container(s)", len(result.Helpers)))
+		return 0
+	}
+
+	c.Ui.Info(fmt.Sprintf("Removed %d of %d helper container(s).", result.Removed, len(result.Helpers)))
+	if result.Removed != len(result.Helpers) {
 		return 1
 	}
 	return 0
 }
 
-type helperRow struct {
-	ID     string
-	Name   string
-	Target string
-	Ports  string
+// formatHelperRow renders one helper for `cleanup` and `list` output. The
+// detailed form adds the network and address the helper dials. A stale
+// helper always ends with its stale reason.
+func formatHelperRow(h portforward.Helper, detailed bool) string {
+	row := fmt.Sprintf("%s  name=%s target=%s ports=%s",
+		truncateID(h.ID), h.Name, truncateID(h.Target), h.Ports)
+	if detailed {
+		row += fmt.Sprintf(" bindings=%s network=%s address=%s", h.Bindings, h.TargetNetwork, h.TargetAddress)
+	}
+	if h.Stale {
+		row += fmt.Sprintf(" stale=%q", h.StaleReason)
+	}
+	return row
 }
 
 func truncateID(id string) string {

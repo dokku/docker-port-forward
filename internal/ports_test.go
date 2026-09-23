@@ -29,6 +29,26 @@ func TestParsePortSpec(t *testing.T) {
 		{"empty protocol rejected", "53/", PortPair{}, true},
 		{"missing port before proto", "/udp", PortPair{}, true},
 		{"negative", "-1:80", PortPair{}, true},
+		{"ipv4 address", "127.0.0.1:8080:80", PortPair{Address: "127.0.0.1", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"all interfaces", "0.0.0.0:5432:5432", PortPair{Address: "0.0.0.0", LocalPort: 5432, RemotePort: 5432, Protocol: ProtocolTCP}, false},
+		{"localhost address", "localhost:8080:80", PortPair{Address: "localhost", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"address auto local", "127.0.0.1::80", PortPair{Address: "127.0.0.1", LocalPort: 0, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"address udp", "0.0.0.0:5353:53/udp", PortPair{Address: "0.0.0.0", LocalPort: 5353, RemotePort: 53, Protocol: ProtocolUDP}, false},
+		{"bracketed ipv6", "[::1]:8080:80", PortPair{Address: "::1", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"bracketed ipv6 auto local udp", "[::]::53/udp", PortPair{Address: "::", LocalPort: 0, RemotePort: 53, Protocol: ProtocolUDP}, false},
+		{"unbracketed ipv6", "::1:8080:80", PortPair{}, true},
+		{"hostname address", "example.com:8080:80", PortPair{}, true},
+		{"partial ip address", "1.2.3:80:80", PortPair{}, true},
+		{"all interfaces keyword", "*:8080:80", PortPair{Address: "*", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"all interfaces keyword auto local", "*::80", PortPair{Address: "*", LocalPort: 0, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"all interfaces udp", "*:53:53/udp", PortPair{Address: "*", LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP}, false},
+		{"docker empty host ip", ":8080:80", PortPair{Address: "*", LocalPort: 8080, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"docker empty host ip auto local", "::80", PortPair{Address: "*", LocalPort: 0, RemotePort: 80, Protocol: ProtocolTCP}, false},
+		{"empty brackets", "[]:8080:80", PortPair{}, true},
+		{"bracketed ipv4", "[127.0.0.1]:8080:80", PortPair{}, true},
+		{"unclosed bracket", "[::1:8080:80", PortPair{}, true},
+		{"bracket without local", "[::1]:80", PortPair{}, true},
+		{"too many parts", "1.2.3.4:1:2:3", PortPair{}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,14 +108,30 @@ func TestParsePortSpecs(t *testing.T) {
 
 func TestPortPairString(t *testing.T) {
 	cases := map[string]PortPair{
-		"80:80":    {LocalPort: 80, RemotePort: 80},
-		":8080":    {LocalPort: 0, RemotePort: 8080},
-		"53:53/udp": {LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
-		":53/udp":  {LocalPort: 0, RemotePort: 53, Protocol: ProtocolUDP},
+		"80:80":               {LocalPort: 80, RemotePort: 80},
+		":8080":               {LocalPort: 0, RemotePort: 8080},
+		"53:53/udp":           {LocalPort: 53, RemotePort: 53, Protocol: ProtocolUDP},
+		":53/udp":             {LocalPort: 0, RemotePort: 53, Protocol: ProtocolUDP},
+		"127.0.0.1:8080:80":   {Address: "127.0.0.1", LocalPort: 8080, RemotePort: 80},
+		"0.0.0.0::80":         {Address: "0.0.0.0", LocalPort: 0, RemotePort: 80},
+		"[::1]:5353:53/udp":   {Address: "::1", LocalPort: 5353, RemotePort: 53, Protocol: ProtocolUDP},
+		"localhost:9000:9000": {Address: "localhost", LocalPort: 9000, RemotePort: 9000},
+		"*:8080:80":           {Address: "*", LocalPort: 8080, RemotePort: 80},
+		"*::53/udp":           {Address: "*", LocalPort: 0, RemotePort: 53, Protocol: ProtocolUDP},
 	}
 	for want, in := range cases {
-		if got := in.String(); got != want {
+		got := in.String()
+		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
+		}
+		// Every rendered form parses back to the same pair.
+		parsed, err := ParsePortSpec(got)
+		if err != nil {
+			t.Fatalf("round-trip of %q failed: %v", got, err)
+		}
+		in.Protocol = NormalizeProtocol(in.Protocol)
+		if parsed != in {
+			t.Fatalf("round-trip of %q: got %+v, want %+v", got, parsed, in)
 		}
 	}
 }
@@ -109,5 +145,33 @@ func TestNormalizeProtocol(t *testing.T) {
 	}
 	if got := NormalizeProtocol(ProtocolUDP); got != ProtocolUDP {
 		t.Fatalf("udp unchanged, got %q", got)
+	}
+}
+
+func TestValidateAddress(t *testing.T) {
+	for _, ok := range []string{"127.0.0.1", "0.0.0.0", "::1", "::", "localhost", "*"} {
+		if err := ValidateAddress(ok); err != nil {
+			t.Fatalf("expected %q to be valid: %v", ok, err)
+		}
+	}
+	err := ValidateAddress("example.com")
+	if err == nil || err.Error() != `invalid address "example.com": must be an IP address, "localhost" or "*"` {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateAddresses(t *testing.T) {
+	for _, ok := range [][]string{nil, {"localhost"}, {"127.0.0.1", "::1"}, {"*"}} {
+		if err := ValidateAddresses(ok); err != nil {
+			t.Fatalf("expected %v to be valid: %v", ok, err)
+		}
+	}
+	err := ValidateAddresses([]string{"localhost", "example.com"})
+	if err == nil || err.Error() != `invalid --address value "example.com": must be an IP address, "localhost" or "*"` {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	err = ValidateAddresses([]string{"*", "127.0.0.1"})
+	if err == nil || err.Error() != `invalid --address value "*": cannot be combined with other addresses` {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
