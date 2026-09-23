@@ -212,6 +212,7 @@ teardown() {
   assert_output_contains "--helper-image"
   assert_output_contains "--label"
   assert_output_contains "--name"
+  assert_output_contains "--restart"
   assert_output_contains "<target>"
   assert_output_contains "ports..."
 }
@@ -246,6 +247,18 @@ teardown() {
   run "$DOCKER_PORT_FORWARD" port-forward --pull bogus container/foo 8080:80
   assert_failure
   assert_output_contains "invalid --pull value"
+}
+
+@test "smoke: port-forward rejects invalid --restart value" {
+  run "$DOCKER_PORT_FORWARD" port-forward --detach --restart sometimes container/foo 8080:80
+  assert_failure
+  assert_output_contains "invalid restart policy: unknown policy 'sometimes'"
+}
+
+@test "smoke: port-forward rejects --restart without --detach" {
+  run "$DOCKER_PORT_FORWARD" port-forward --restart always container/foo 8080:80
+  assert_failure
+  assert_output_contains "conflicting options: cannot specify both --restart and an attached (auto-removed) helper; use --detach"
 }
 
 @test "smoke: port-forward rejects invalid --label format" {
@@ -324,6 +337,43 @@ teardown() {
   if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
     flunk "curl to forwarded port ${PORT} never succeeded"
   fi
+}
+
+@test "integration: detached helper defaults to unless-stopped restart policy" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-restart-default-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$NAME"
+  assert_success
+  assert_output "unless-stopped"
+}
+
+@test "integration: --restart sets the helper restart policy" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-restart-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --restart on-failure:2 \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{.HostConfig.RestartPolicy.Name}}:{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "$NAME"
+  assert_success
+  assert_output "on-failure:2"
 }
 
 @test "integration: extra labels are applied to the helper container" {

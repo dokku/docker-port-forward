@@ -56,6 +56,7 @@ Multiple port specs may be provided. If no port specs are given, the command pro
 | `--project-directory` | string | | Alternate Compose project directory. |
 | `-p, --project-name` | string | directory name | Compose project name; used when resolving `service/` or bare-name targets. |
 | `--pull` | string | `missing` | Pull policy for the helper image: `always`, `missing`, or `never`. |
+| `--restart` | string | `unless-stopped` with `--detach`, `no` otherwise | Restart policy to apply when a container exits. Takes the same values as `docker container create --restart`: `no`, `always`, `unless-stopped`, or `on-failure[:max-retries]`. Any value other than `no` requires `--detach`, because attached helpers are auto-removed. See [Helper Image](helper-image.md#restart-policy). |
 | `--udp-timeout` | duration | `60s` | Idle timeout for UDP pseudo-sessions inside the helper (`socat -T` for every UDP forward). Ignored when the invocation has no UDP pairs. |
 
 ## Auto-detection
@@ -68,7 +69,7 @@ When no port specs are supplied, the command starts a short-lived probe containe
 
 ## Idempotency
 
-If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts.
+If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts. The existing helper is reused as-is, even if it was created with a different `--restart` policy.
 
 ## Preflight host-port check
 
@@ -130,6 +131,12 @@ Run in the background and give the helper an explicit name:
 docker pf --detach --name mydb my-db 5432:5432
 ```
 
+Run in the background without restarting the helper when it exits or the daemon restarts:
+
+```bash
+docker pf --detach --restart no my-db 5432:5432
+```
+
 Add extra labels to the helper container (useful for your own `docker ps --filter` queries):
 
 ```bash
@@ -162,7 +169,7 @@ docker pf -f docker-compose.yml -f docker-compose.dev.yml -p proj service/api 30
 
 ## Exit behavior
 
-In attached mode the command blocks until it receives `SIGINT` (Ctrl-C) or `SIGTERM`, then stops and removes the helper container it created. In detached mode the helper survives after the CLI returns and is cleaned up only when a `cleanup` command removes it (or by `docker rm`).
+In attached mode the command blocks until it receives `SIGINT` (Ctrl-C) or `SIGTERM`, then stops and removes the helper container it created. In detached mode the helper survives after the CLI returns and is cleaned up only when a `cleanup` command removes it (or by `docker rm`). With the default `unless-stopped` restart policy, a detached helper is also restarted after it exits or the Docker daemon restarts, unless it was stopped explicitly.
 
 ## port-forward cleanup
 
@@ -200,3 +207,4 @@ docker ps -aq --filter 'label=com.dokku.port-forward=true' | xargs -r docker rm 
 - [Target Resolution](target-resolution.md) -- how `container/`, `service/`, and bare-name targets are resolved
 - [Compose Integration](compose-integration.md) -- details on Compose flags and service lookup
 - [Helper Image](helper-image.md) -- the sidecar container that handles the actual proxy
+- [Library Usage](library-usage.md) -- using the same functionality from Go code

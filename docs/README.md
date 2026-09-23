@@ -16,3 +16,7 @@ Complete documentation for docker-port-forward, a Docker CLI plugin that forward
 - [Compose Integration](compose-integration.md) -- resolving Compose services with `-f`/`-p`/profiles
 - [Helper Image](helper-image.md) -- the sidecar container used to proxy connections
 - [Limitations](limitations.md) -- network modes, target configurations, and host setups that are not supported
+
+## Library
+
+- [Library Usage](library-usage.md) -- using `Forward` and `Cleanup` from Go code

@@ -68,7 +68,7 @@ listen_addresses = '*'
 
 ### IPv6-only services inside the target
 
-The helper's socat command currently uses `TCP:<ipv4>:<port>`. A service listening only on IPv6 inside the container cannot be reached. Most images listen on IPv4 by default; if yours does not, rebind it.
+The helper's socat command currently uses `TCP:<target>:<port>`, where `<target>` is the target's IPv4 address or its container name resolved over IPv4. A service listening only on IPv6 inside the container cannot be reached. Most images listen on IPv4 by default; if yours does not, rebind it.
 
 ## UDP forwarding
 
@@ -125,7 +125,9 @@ Use a non-privileged host port (`--address 0.0.0.0 80:80` still requires daemon 
 
 - **Idempotency is per-pair-overlap, not per-request:** if a running helper for the same target already covers any `(local, remote)` in your request, the command exits `0` without adding the rest. Stop the existing helper first if you need a different combination.
 - **One helper per distinct remote port:** socat runs once per unique remote, with `fork` handling concurrent connections. A huge connection volume may still saturate a single process.
-- **Helper is unsupervised:** a dying helper (OOM, network loss) is not restarted. Use `docker port-forward cleanup --name <name>` and re-run, or wrap with your own supervisor.
+- **Only detached helpers are restarted:** detached helpers use the `unless-stopped` restart policy by default (configurable with `--restart`), so Docker restarts them after a crash or daemon restart. Attached helpers are auto-removed and never restarted; if one dies, re-run the command.
+- **Target IP changes on the default `bridge` network:** on a user-defined network the helper reaches the target by container name, so a target restart that changes its IP is handled. On the default `bridge` network there is no embedded DNS, so the helper uses the target's IP and a detached forward stops working if the target comes back with a different IP. Put the target on a user-defined network, or remove the helper and re-run the command.
+- **Recreated targets:** if the target is recreated rather than restarted (for example `docker compose up` after a config change), the helper keeps forwarding to the new container by name. Its `com.dokku.port-forward.target` label still holds the old container ID, though, so `docker port-forward cleanup --target <new>` won't match it. Use `cleanup --name <helper>` or plain `cleanup` instead.
 - **No TLS termination:** traffic is proxied raw. If the target serves TLS, clients should connect using its TLS settings; the helper does no re-encoding.
 
 ## Reporting new limitations

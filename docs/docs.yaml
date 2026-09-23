@@ -5,3 +5,4 @@ docs:
   - compose-integration.md
   - helper-image.md
   - limitations.md
+  - library-usage.md

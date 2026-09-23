@@ -22,6 +22,9 @@ import (
 // Defaults and well-known labels set on helper containers.
 const (
 	DefaultHelperImage = "alpine/socat"
+	// DefaultRunningTimeout is how long to wait for the helper container to
+	// reach the running state.
+	DefaultRunningTimeout = time.Minute
 	// DefaultUDPTimeout is the default idle timeout applied to each UDP
 	// socat invocation (socat's -T flag). A UDP pseudo-session with no
 	// traffic for this long is dropped inside the helper. TCP is unaffected.
@@ -42,6 +45,15 @@ const (
 	PullNever   = "never"
 )
 
+// Restart policies for the helper container, matching
+// `docker container create --restart`.
+const (
+	RestartNo            = string(container.RestartPolicyDisabled)
+	RestartAlways        = string(container.RestartPolicyAlways)
+	RestartUnlessStopped = string(container.RestartPolicyUnlessStopped)
+	RestartOnFailure     = string(container.RestartPolicyOnFailure)
+)
+
 // Logger is the minimal structured logger used by the forwarder.
 type Logger interface {
 	Info(message string)
@@ -59,6 +71,10 @@ type ForwardInput struct {
 	PullPolicy     string
 	RunningTimeout time.Duration
 	Detach         bool
+	// RestartPolicy is applied to detached helpers. An empty policy falls
+	// back to unless-stopped. Attached helpers are auto-removed and always
+	// use "no".
+	RestartPolicy container.RestartPolicy
 	// Name is the helper container name. If empty, a name is auto-generated.
 	Name string
 	// ExtraLabels are user-supplied labels added to the helper container.
@@ -106,7 +122,10 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		in.PullPolicy = PullMissing
 	}
 	if in.RunningTimeout <= 0 {
-		in.RunningTimeout = time.Minute
+		in.RunningTimeout = DefaultRunningTimeout
+	}
+	if in.RestartPolicy.Name == "" {
+		in.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}
 	}
 	if in.UDPTimeout <= 0 {
 		in.UDPTimeout = DefaultUDPTimeout
@@ -115,15 +134,12 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	if len(addresses) == 0 {
 		return ForwardResult{}, errors.New("no valid listen addresses")
 	}
-	// Normalize empty protocols to TCP so equality + label encoding are consistent.
-	for i := range in.Pairs {
-		in.Pairs[i].Protocol = NormalizeProtocol(in.Pairs[i].Protocol)
-	}
-
 	// Resolve any auto-allocated local ports (LocalPort == 0) by briefly
 	// binding a TCP listener on "" to have the OS assign a free port. This
 	// lets us pass a concrete port to Docker's -p binding and ensures both
 	// IPv4 and IPv6 bindings for "localhost" share the same port number.
+	// resolveAutoPorts also normalizes empty protocols to TCP so equality and
+	// label encoding are consistent, without mutating the caller's slice.
 	pairs, err := resolveAutoPorts(in.Pairs)
 	if err != nil {
 		return ForwardResult{}, err
@@ -182,6 +198,7 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		session,
 		in.ExtraLabels,
 		in.Detach,
+		in.RestartPolicy,
 		in.UDPTimeout,
 	)
 	hostCfg.NetworkMode = container.NetworkMode(networkName)
@@ -228,11 +245,11 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 func resolveAutoPorts(in []PortPair) ([]PortPair, error) {
 	out := make([]PortPair, len(in))
 	for i, p := range in {
+		proto := NormalizeProtocol(p.Protocol)
 		if p.LocalPort != 0 {
-			out[i] = p
+			out[i] = PortPair{LocalPort: p.LocalPort, RemotePort: p.RemotePort, Protocol: proto}
 			continue
 		}
-		proto := NormalizeProtocol(p.Protocol)
 		var port int
 		switch proto {
 		case ProtocolTCP:
@@ -390,6 +407,7 @@ func buildHelperContainerConfig(
 	targetAddr, name, session string,
 	extraLabels map[string]string,
 	detach bool,
+	restartPolicy container.RestartPolicy,
 	udpTimeout time.Duration,
 ) (*container.Config, *container.HostConfig) {
 	type socatKey struct {
@@ -471,21 +489,26 @@ func buildHelperContainerConfig(
 		Labels:       labels,
 		ExposedPorts: exposed,
 	}
+	// Attached helpers are ephemeral and auto-removed, which Docker doesn't
+	// allow together with a restart policy. Detached helpers need to survive
+	// CLI exit so they can be cleaned up explicitly later.
+	if !detach {
+		restartPolicy = container.RestartPolicy{Name: container.RestartPolicyDisabled}
+	}
 	hostCfg := &container.HostConfig{
-		PortBindings: bindings,
-		// Attached helpers are ephemeral; detached helpers need to survive
-		// CLI exit so they can be cleaned up explicitly later.
-		AutoRemove: !detach,
-		RestartPolicy: container.RestartPolicy{
-			Name: "no",
-		},
+		PortBindings:  bindings,
+		AutoRemove:    !detach,
+		RestartPolicy: restartPolicy,
 	}
 	return cfg, hostCfg
 }
 
 // pickTargetNetwork chooses a network to attach the helper to and returns the
-// target's IP address on that network. User-defined networks are preferred
-// over the default bridge so Docker's embedded DNS is available as a fallback.
+// address socat should connect to on that network. User-defined networks are
+// preferred over the default bridge because Docker's embedded DNS lets the
+// helper reach the target by container name, so the forward keeps working
+// when the target restarts with a new IP. On the default bridge there is no
+// embedded DNS, so the target's IP is used.
 func pickTargetNetwork(info container.InspectResponse) (networkName string, targetAddr string, err error) {
 	if info.NetworkSettings == nil || len(info.NetworkSettings.Networks) == 0 {
 		return "", "", errors.New("target container has no networks")
@@ -498,10 +521,14 @@ func pickTargetNetwork(info container.InspectResponse) (networkName string, targ
 		userDefined = append(userDefined, name)
 	}
 	sort.Strings(userDefined)
+	containerName := strings.TrimPrefix(info.Name, "/")
 	if len(userDefined) > 0 {
 		for _, name := range userDefined {
 			endpoint := info.NetworkSettings.Networks[name]
 			if endpoint != nil && endpoint.IPAddress.IsValid() {
+				if containerName != "" {
+					return name, containerName, nil
+				}
 				return name, endpoint.IPAddress.String(), nil
 			}
 		}

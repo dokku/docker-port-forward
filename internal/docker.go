@@ -30,9 +30,9 @@ type DockerClientInterface interface {
 	ImagePull(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error)
 }
 
-// DockerClient wraps the real Docker client with the interface we use.
+// DockerClient wraps a Docker API client with the interface we use.
 type DockerClient struct {
-	cli *dockerClient.Client
+	cli dockerClient.APIClient
 }
 
 // NewDockerClient returns a Docker client using the environment-configured daemon.
@@ -44,7 +44,13 @@ func NewDockerClient() (DockerClientInterface, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error creating Docker client: %v", err)
 	}
-	return &DockerClient{cli: cli}, nil
+	return WrapDockerClient(cli), nil
+}
+
+// WrapDockerClient adapts an existing Docker API client to
+// DockerClientInterface. Closing the returned client closes cli.
+func WrapDockerClient(cli dockerClient.APIClient) DockerClientInterface {
+	return &DockerClient{cli: cli}
 }
 
 // Close closes the underlying Docker client connection.

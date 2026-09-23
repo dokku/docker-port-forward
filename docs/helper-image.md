@@ -7,16 +7,29 @@ Unlike `kubectl port-forward`, which tunnels through the Kubernetes API server's
 When a forward starts, the plugin:
 
 1. Ensures the helper image is available (see [Pull policy](#pull-policy) below).
-2. Inspects the target to pick a network both it and the helper can share (a user-defined network is preferred; otherwise the default `bridge`) and learns the target's IP address on that network.
+2. Inspects the target to pick a network both it and the helper can share (a user-defined network is preferred; otherwise the default `bridge`). On a user-defined network the helper reaches the target by container name through Docker's embedded DNS, so the forward keeps working if the target restarts with a new IP. On the default `bridge` there is no embedded DNS, so the helper uses the target's IP address on that network.
 3. Verifies each requested host port is currently free on each requested address.
 4. Looks for an existing helper for the same target whose labels say it already covers any of the requested `(local, remote)` pairs. If one is found, the command exits `0` without creating a new helper (see [Idempotency](command-reference.md#idempotency)).
 5. Creates a container from the helper image with:
    - `--network <target-network>` and `-p <addr>:<local>:<remote>` for every requested port pair and address.
-   - A shell command that launches one `socat TCP-LISTEN:<remote>,fork,reuseaddr TCP:<target-ip>:<remote>` per distinct remote port, supervised by `sh -c` with a `trap 'kill 0' EXIT` so a dying socat brings down the helper.
+   - A shell command that launches one `socat TCP-LISTEN:<remote>,fork,reuseaddr TCP:<target>:<remote>` per distinct remote port, where `<target>` is the target's container name or IP from step 2, supervised by `sh -c` with a `trap 'kill 0' EXIT` so a dying socat brings down the helper.
    - Labels `com.dokku.port-forward=true`, `target=<id>`, `session=<uuid>`, `name=<container-name>`, `ports=<encoded-pairs>`, `addresses=<addr-list>`, plus any user-supplied `--label` values.
-   - `AutoRemove: true` for attached mode; `AutoRemove: false` for `--detach` (so the helper survives until explicitly removed).
+   - `AutoRemove: true` and restart policy `no` for attached mode; `AutoRemove: false` and the `--restart` policy (default `unless-stopped`) for `--detach`, so the helper survives until explicitly removed.
 
 When the CLI is attached and receives `SIGINT`/`SIGTERM`, it stops and removes the helper. In detached mode the helper keeps running until it is removed via `docker port-forward cleanup` or plain `docker rm`.
+
+## Restart policy
+
+Detached helpers act as long-lived ambassadors for their target. By default they use the `unless-stopped` restart policy, so Docker restarts them if they exit or when the daemon restarts, unless they were stopped explicitly. Use `--restart` to choose a different policy. It takes the same values as `docker container create --restart`:
+
+| Value | Behavior |
+| ----- | -------- |
+| `unless-stopped` (default with `--detach`) | Restart unless the helper was explicitly stopped. |
+| `always` | Always restart, including after an explicit stop once the daemon restarts. |
+| `on-failure[:max-retries]` | Restart only when the helper exits non-zero, optionally capped at `max-retries` attempts. |
+| `no` | Never restart. |
+
+Attached helpers are auto-removed when the CLI exits, which Docker doesn't allow together with a restart policy, so `--restart` values other than `no` require `--detach`.
 
 ## Auto-detection
 
