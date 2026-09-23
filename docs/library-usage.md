@@ -26,27 +26,27 @@ With `Detach: true`, `Forward` returns once the helper container is running. The
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
+    "context"
+    "fmt"
+    "log"
 
-	"github.com/dokku/docker-port-forward/portforward"
+    "github.com/dokku/docker-port-forward/portforward"
 )
 
 func main() {
-	result, err := portforward.Forward(context.Background(), portforward.Options{
-		Target: "my-db",
-		Ports:  []string{"5432:5432"},
-		Detach: true,
-		Name:   "mydb-forward",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+    result, err := portforward.Forward(context.Background(), portforward.Options{
+        Target: "my-db",
+        Ports:  []string{"5432:5432"},
+        Detach: true,
+        Name:   "mydb-forward",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	for _, p := range result.Ports {
-		fmt.Printf("forwarding %d -> %d/%s via %s\n", p.Local, p.Remote, p.Protocol, result.HelperName)
-	}
+    for _, p := range result.Ports {
+        fmt.Printf("forwarding %d -> %d/%s via %s\n", p.Local, p.Remote, p.Protocol, result.HelperName)
+    }
 }
 ```
 
@@ -61,13 +61,13 @@ ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
 
 go func() {
-	_, err := portforward.Forward(ctx, portforward.Options{
-		Target: "service/web",
-		Ports:  []string{":80"},
-	})
-	if err != nil {
-		log.Print(err)
-	}
+    _, err := portforward.Forward(ctx, portforward.Options{
+        Target: "service/web",
+        Ports:  []string{":80"},
+    })
+    if err != nil {
+        log.Print(err)
+    }
 }()
 
 // ... use the forward, then call cancel() to tear it down.
@@ -79,10 +79,10 @@ go func() {
 
 ```go
 result, err := portforward.Cleanup(context.Background(), portforward.CleanupOptions{
-	Name: "mydb-forward",
+    Name: "mydb-forward",
 })
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 fmt.Printf("removed %d of %d helpers\n", result.Removed, len(result.Helpers))
 ```
@@ -94,15 +94,15 @@ Removal failures for individual helpers are passed to the `Logger` and reflected
 ```go
 cli, err := client.NewClientWithOpts(client.WithHost("unix:///var/run/docker.sock"), client.WithAPIVersionNegotiation())
 if err != nil {
-	log.Fatal(err)
+    log.Fatal(err)
 }
 defer cli.Close()
 
 _, err = portforward.Forward(ctx, portforward.Options{
-	Target: "my-container",
-	Ports:  []string{"8080:80"},
-	Detach: true,
-	Client: cli,
+    Target: "my-container",
+    Ports:  []string{"8080:80"},
+    Detach: true,
+    Client: cli,
 })
 ```
 
