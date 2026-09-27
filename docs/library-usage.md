@@ -55,7 +55,7 @@ func main() {
 
 ## Per-port addresses and logging
 
-`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. Use `portforward.AllInterfaces` (`"*"`) in `Addresses`, or a `*:LOCAL:REMOTE` / `:LOCAL:REMOTE` spec, to publish on every IPv4 and IPv6 interface like `docker run -p LOCAL:REMOTE`; `0.0.0.0` binds IPv4 only. `TCPHalfCloseTimeout` sets socat's `-t` for TCP forwards, like `--tcp-half-close-timeout`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`. `SkipPreflight`, like `--skip-preflight`, skips the host-port check so ports below 1024 can be forwarded when the program isn't running as root.
+`Ports` takes the same `docker run -p` style specs as the CLI, so each port can be bound on its own address. Specs without an address are bound on every entry in `Addresses`. Use `portforward.AllInterfaces` (`"*"`) in `Addresses`, or a `*:LOCAL:REMOTE` / `:LOCAL:REMOTE` spec, to publish on every IPv4 and IPv6 interface like `docker run -p LOCAL:REMOTE`; `0.0.0.0` binds IPv4 only. `TCPHalfCloseTimeout` sets socat's `-t` for TCP forwards, like `--tcp-half-close-timeout`. `LogDriver` and `LogOpts` set the helper's logging, like `--log-driver` and `--log-opt`. `SkipPreflight`, like `--skip-preflight`, skips the host-port check so ports below 1024 can be forwarded when the program isn't running as root. `SourceRange`, like `--source-range`, only accepts connections from clients in one IP address or CIDR, and `Helper.SourceRange` from `portforward.List` reports the range a helper was made with.
 
 ```go
 result, err := portforward.Forward(ctx, portforward.Options{

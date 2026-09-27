@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -980,4 +981,56 @@ func TestIntegration_AllInterfacesBinding(t *testing.T) {
 
 	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", result.Pairs[0].LocalPort), 10*time.Second)
 	resp.Body.Close()
+}
+
+// ---------------------------------------------------------------------------
+// Source range
+// ---------------------------------------------------------------------------
+
+func TestIntegration_SourceRange(t *testing.T) {
+	ctx, cli := setupIntegration(t)
+	targetID := startNginxTarget(t, ctx, cli)
+
+	forward := func(sourceRange string) int {
+		t.Helper()
+		result, err := StartForward(ctx, ForwardInput{
+			Client:      cli,
+			Target:      ResolvedTarget{ContainerID: targetID, ContainerName: "nginx"},
+			Pairs:       []PortPair{{LocalPort: 0, RemotePort: 80}},
+			Addresses:   []string{"127.0.0.1"},
+			Detach:      true,
+			SourceRange: netip.MustParsePrefix(sourceRange),
+			ExtraLabels: map[string]string{"dpf-integration": "true"},
+			Logger:      &testLogger{t: t},
+		})
+		if err != nil {
+			t.Fatalf("StartForward returned error: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cli.ContainerRemove(ctx, result.HelperID, dockerClient.ContainerRemoveOptions{Force: true})
+		})
+		return result.Pairs[0].LocalPort
+	}
+
+	// every client is in range, whichever address the daemon hands the
+	// connection to the helper from
+	resp := httpGetWithRetry(t, fmt.Sprintf("http://127.0.0.1:%d/", forward("0.0.0.0/0")), 10*time.Second)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 through a forward open to every client, got %d", resp.StatusCode)
+	}
+
+	// no client is in a documentation range, so socat closes every
+	// connection before anything reaches nginx
+	refused := forward("192.0.2.0/24")
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", refused))
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("expected a client outside the range to be refused, got %d", resp.StatusCode)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

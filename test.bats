@@ -362,6 +362,12 @@ teardown() {
   assert_output_contains "Remove leftover port-forward helper containers"
 }
 
+@test "smoke: invalid --source-range is rejected before docker is contacted" {
+  run "$DOCKER_PORT_FORWARD" port-forward --source-range 10.0.0.0/8,192.168.0.0/16 container/missing 8080:80
+  assert_failure
+  assert_output_contains 'invalid --source-range value "10.0.0.0/8,192.168.0.0/16": must be an IP address or CIDR'
+}
+
 # ---------------------------------------------------------------------------
 # Feature integration tests (require a Docker daemon)
 # ---------------------------------------------------------------------------
@@ -538,6 +544,52 @@ teardown() {
   run docker inspect -f '{{index .Config.Cmd 0}}' "$NAME"
   assert_success
   assert_output_contains "socat -t 100000000 TCP-LISTEN:80"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
+  fi
+}
+
+@test "integration: --source-range refuses clients outside the range" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-source-range-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --source-range 192.0.2.0/24 \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run docker inspect -f '{{index .Config.Cmd 0}}' "$NAME"
+  assert_success
+  assert_output_contains "TCP-LISTEN:80,fork,reuseaddr,pf=ip4,range=192.0.2.0/24 "
+
+  run docker inspect -f '{{index .Config.Labels "com.dokku.port-forward.source-range"}}' "$NAME"
+  assert_success
+  assert_output "192.0.2.0/24"
+
+  run "$DOCKER_PORT_FORWARD" port-forward list --name "$NAME"
+  assert_success
+  assert_output_contains "source-range=192.0.2.0/24"
+
+  # no client here is in a documentation range
+  if wait_http "http://127.0.0.1:${PORT}/" 3; then
+    flunk "a client outside the source range reached the forwarded port ${PORT}"
+  fi
+
+  # re-running with every client in range replaces the helper
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --source-range 0.0.0.0/0 \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+  assert_output_contains "source range changed from 192.0.2.0/24 to 0.0.0.0/0"
 
   if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
     flunk "curl to forwarded port ${PORT} never succeeded"

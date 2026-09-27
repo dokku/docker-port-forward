@@ -67,6 +67,7 @@ Multiple port specs may be provided. If no port specs are given, the command pro
 | `--pull` | string | `missing` | Pull policy for the helper image: `always`, `missing`, or `never`. |
 | `--restart` | string | `unless-stopped` with `--detach`, `no` otherwise | Restart policy to apply when a container exits. Takes the same values as `docker container create --restart`: `no`, `always`, `unless-stopped`, or `on-failure[:max-retries]`. Any value other than `no` requires `--detach`, because attached helpers are auto-removed. See [Helper Image](helper-image.md#restart-policy). |
 | `--skip-preflight` | bool | `false` | Skip the [preflight host-port check](#preflight-host-port-check). Needed to forward ports below 1024 when the plugin isn't running as root. |
+| `--source-range` | string | every client | Only accept connections from clients in this IP address or CIDR, such as `10.0.0.0/8` or `203.0.113.7`. A bare address is a range of one. Only one range may be given. See [Source range](#source-range). |
 | `--tcp-half-close-timeout` | duration | `0` (socat's `0.5s`) | How long each TCP forward waits for the other side after one side closes its write half (`socat -t`). Raise it for clients that half-close and then wait for a reply; the old dokku ambassador used `100000000s`. Must not be negative. |
 | `--udp-timeout` | duration | `60s` | Idle timeout for UDP pseudo-sessions inside the helper (`socat -T` for every UDP forward). Ignored when the invocation has no UDP pairs. |
 
@@ -83,6 +84,20 @@ When no port specs are supplied, the command starts a short-lived probe containe
 If a running helper for the same target already covers any of the requested `(local, remote)` pairs, the command prints the existing helper's identity and exits `0` without creating a new one. This makes it safe to re-run `docker pf ... --detach` from scripts. The existing helper is reused as-is, even if it was created with a different `--restart`, `--log-driver`, `--log-opt` or `--tcp-half-close-timeout` setting.
 
 The exception is a stale helper, one that can no longer reach its target (see [`port-forward list`](#port-forward-list)). A stale helper is removed and replaced with a new one, so re-running the command fixes a forward whose target changed IP on the default `bridge` network. A running helper that holds a requested host port for a target container that no longer exists is also removed.
+
+A helper that accepts a different `--source-range` is replaced too, including one with no range when a range is requested and the other way around, since reusing it would leave the old range in force.
+
+## Source range
+
+`--source-range` limits the forward to clients in one IP address or CIDR. Each socat listener in the helper is started with socat's `range` option, which closes a connection from outside the range before anything is forwarded. The range is recorded in the `com.dokku.port-forward.source-range` label.
+
+The range is checked against the address the connection reaches the helper from, which is not always the client's own:
+
+- Connections from other hosts that Docker delivers by NAT keep the client's address.
+- Connections to a host port on the loopback interface, and IPv6 connections to a helper without IPv6, go through Docker's userland proxy and arrive from the network's gateway address, such as `172.17.0.1`. A range that leaves out the gateway refuses them.
+- An IPv6 range makes each listener accept IPv6 only, so it refuses every connection on a network without IPv6.
+
+socat takes a single range per listener, which is why only one may be given. Allow a set of networks that don't share a prefix with a host firewall instead.
 
 ## Preflight host-port check
 
@@ -201,6 +216,12 @@ Bind all IPv4 interfaces only:
 docker pf --address 0.0.0.0 my-container 8080:80
 ```
 
+Publish on every IPv4 interface, but only accept clients on one network:
+
+```bash
+docker pf --detach --address 0.0.0.0 --source-range 10.0.0.0/8 my-db 5432:5432
+```
+
 Keep TCP connections open after a client half-closes, like the old dokku ambassador:
 
 ```bash
@@ -264,7 +285,7 @@ docker pf list [flags]
 | `--stale` | bool | `false` | Only show stale helpers. |
 | `--target` | string | | Only show helpers for the given target container id or name. Ignored when `--name` is set. |
 
-Each row has the form `<short-id>  name=<name> target=<target-short-id> ports=<ports> bindings=<bindings> network=<network> address=<address>`, where `network` and `address` are the network the helper shares with the target and what it dials there. Stale helpers end with `stale="<reason>"`.
+Each row has the form `<short-id>  name=<name> target=<target-short-id> ports=<ports> bindings=<bindings> network=<network> address=<address>`, where `network` and `address` are the network the helper shares with the target and what it dials there. A helper made with `--source-range` adds `source-range=<cidr>`. Stale helpers end with `stale="<reason>"`.
 
 A helper is stale when:
 

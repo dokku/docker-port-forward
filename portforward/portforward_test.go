@@ -637,6 +637,16 @@ func TestForward_AddressAndHalfCloseValidation(t *testing.T) {
 			opts:    Options{Target: "web", Ports: []string{"80"}, TCPHalfCloseTimeout: -time.Second},
 			wantErr: `invalid --tcp-half-close-timeout value "-1s": must not be negative`,
 		},
+		{
+			name:    "hostname source range",
+			opts:    Options{Target: "web", Ports: []string{"80"}, SourceRange: "example.com"},
+			wantErr: `invalid --source-range value "example.com": must be an IP address or CIDR`,
+		},
+		{
+			name:    "more than one source range",
+			opts:    Options{Target: "web", Ports: []string{"80"}, SourceRange: "10.0.0.0/8,192.168.0.0/16"},
+			wantErr: `invalid --source-range value "10.0.0.0/8,192.168.0.0/16": must be an IP address or CIDR`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -668,6 +678,40 @@ func TestForward_TCPHalfCloseTimeoutReachesHelper(t *testing.T) {
 	}
 	if cmd := fake.created[0].Config.Cmd[0]; !strings.Contains(cmd, "socat -t 100000000 TCP-LISTEN:80") {
 		t.Fatalf("expected -t in helper command: %s", cmd)
+	}
+}
+
+func TestForward_SourceRangeReachesHelper(t *testing.T) {
+	fake := newTargetClient()
+	_, err := Forward(context.Background(), Options{
+		Target:      "web",
+		Ports:       []string{":80"},
+		Addresses:   []string{"127.0.0.1"},
+		Detach:      true,
+		SourceRange: "192.0.2.7",
+		Client:      fake,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	created := fake.created[0].Config
+	if cmd := created.Cmd[0]; !strings.Contains(cmd, "TCP-LISTEN:80,fork,reuseaddr,pf=ip4,range=192.0.2.7/32 ") {
+		t.Fatalf("expected the range in the helper command: %s", cmd)
+	}
+	if got := created.Labels[internal.LabelSourceRange]; got != "192.0.2.7/32" {
+		t.Fatalf("expected the source range label, got %q", got)
+	}
+}
+
+func TestList_ReportsSourceRange(t *testing.T) {
+	fake := driftClient()
+	fake.list[0].Labels[internal.LabelSourceRange] = "10.0.0.0/8"
+	helpers, err := List(context.Background(), ListOptions{Client: fake})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(helpers) != 2 || helpers[0].SourceRange != "10.0.0.0/8" || helpers[1].SourceRange != "" {
+		t.Fatalf("unexpected source ranges: %+v", helpers)
 	}
 }
 

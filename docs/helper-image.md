@@ -8,12 +8,12 @@ When a forward starts, the plugin:
 
 1. Ensures the helper image is available (see [Pull policy](#pull-policy) below).
 2. Inspects the target to pick a network both it and the helper can share (a user-defined network is preferred; otherwise the default `bridge`). On a user-defined network the helper reaches the target by container name through Docker's embedded DNS, so the forward keeps working if the target restarts with a new IP. On the default `bridge` there is no embedded DNS, so the helper uses the target's IP address on that network.
-3. Looks for an existing helper for the same target whose labels say it already covers any of the requested `(local, remote)` pairs. If one is found and can still reach the target, the command exits `0` without creating a new helper (see [Idempotency](command-reference.md#idempotency)). If it is stale, it is removed and replaced (see [Target drift](#target-drift)).
+3. Looks for an existing helper for the same target whose labels say it already covers any of the requested `(local, remote)` pairs. If one is found, can still reach the target and accepts the requested `--source-range`, the command exits `0` without creating a new helper (see [Idempotency](command-reference.md#idempotency)). If it is stale, it is removed and replaced (see [Target drift](#target-drift)), as is one made with a different source range.
 4. Verifies each requested host port is currently free on each of its addresses: the address in its port spec, or every `--address` when the spec has none.
 5. Creates a container from the helper image with:
    - `--network <target-network>` and `-p <addr>:<local>:<remote>` for every requested port pair and each of its addresses. The `*` address becomes `-p <local>:<remote>` with no host IP, so Docker publishes it on every IPv4 and IPv6 interface.
-   - A shell command that launches one `socat [-t <half-close>] TCP-LISTEN:<remote>,fork,reuseaddr TCP:<target>:<remote>` per distinct remote port (`-t` only when `--tcp-half-close-timeout` is set), where `<target>` is the target's container name or IP from step 2, supervised by `sh -c` with a `trap 'kill 0' EXIT` so a dying socat brings down the helper.
-   - Labels `com.dokku.port-forward=true`, `target=<id>`, `target-name=<target-container-name>`, `target-network=<network>`, `target-address=<name-or-ip>`, `session=<uuid>`, `name=<container-name>`, `ports=<encoded-pairs>`, `bindings=<addr:local:remote,...>`, `addresses=<addr-list>`, plus any user-supplied `--label` values.
+   - A shell command that launches one `socat [-t <half-close>] TCP-LISTEN:<remote>,fork,reuseaddr[,pf=<ip4|ip6>,range=<cidr>] TCP:<target>:<remote>` per distinct remote port (`-t` only when `--tcp-half-close-timeout` is set, `pf` and `range` only when `--source-range` is), where `<target>` is the target's container name or IP from step 2, supervised by `sh -c` with a `trap 'kill 0' EXIT` so a dying socat brings down the helper.
+   - Labels `com.dokku.port-forward=true`, `target=<id>`, `target-name=<target-container-name>`, `target-network=<network>`, `target-address=<name-or-ip>`, `session=<uuid>`, `name=<container-name>`, `ports=<encoded-pairs>`, `bindings=<addr:local:remote,...>`, `addresses=<addr-list>`, `source-range=<cidr>` (only with `--source-range`), plus any user-supplied `--label` values.
    - The `--log-driver` and `--log-opt` settings, when given.
    - `AutoRemove: true` and restart policy `no` for attached mode; `AutoRemove: false` and the `--restart` policy (default `unless-stopped`) for `--detach`, so the helper survives until explicitly removed.
 
@@ -84,6 +84,7 @@ The plugin only requires:
 
 - `socat` must be on `PATH`.
 - `sh` must be on `PATH` (so multiple port forwards can share one container).
+- With `--source-range`, `socat` must support the `pf` and `range` listen options. socat 1.8 accepts an IPv4 range as `range=10.0.0.0/8` and an IPv6 one as `range=[2001:db8::]/32`.
 
 ## Extra labels
 

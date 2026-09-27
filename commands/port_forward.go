@@ -34,6 +34,7 @@ type PortForwardCommand struct {
 	pull                string
 	restart             string
 	skipPreflight       bool
+	sourceRange         string
 	tcpHalfCloseTimeout time.Duration
 	runningTimeout      time.Duration
 	udpTimeout          time.Duration
@@ -70,6 +71,7 @@ func (c *PortForwardCommand) Examples() map[string]string {
 		"Bind one port on all interfaces":                  fmt.Sprintf("%s %s my-container :8080:80", appName, c.Name()),
 		"Wait for replies after a client half-closes":      fmt.Sprintf("%s %s --detach --tcp-half-close-timeout 100000000s my-container 8080:80", appName, c.Name()),
 		"Forward a privileged port":                        fmt.Sprintf("%s %s --skip-preflight my-container 80:80", appName, c.Name()),
+		"Only accept clients from one network":             fmt.Sprintf("%s %s --address 0.0.0.0 --source-range 10.0.0.0/8 my-container 5432:5432", appName, c.Name()),
 		"Configure the helper's logging":                   fmt.Sprintf("%s %s --detach --log-driver json-file --log-opt max-size=10m my-container 8080:80", appName, c.Name()),
 		"Forward a UDP port":                               fmt.Sprintf("%s %s my-container 53:53/udp", appName, c.Name()),
 		"Mix TCP and UDP in one command":                   fmt.Sprintf("%s %s my-container 8080:80 53:53/udp", appName, c.Name()),
@@ -118,6 +120,7 @@ func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f.StringVarP(&c.projectName, "project-name", "p", "", "the compose project name")
 	f.StringVar(&c.pull, "pull", portforward.PullMissing, "pull policy for the helper image (always, missing, never)")
 	f.BoolVar(&c.skipPreflight, "skip-preflight", false, "skip checking that host ports are free before creating the helper; needed for ports below 1024 when not running as root")
+	f.StringVar(&c.sourceRange, "source-range", "", "only accept connections from clients in this IP address or CIDR; a single range")
 	f.StringVar(&c.restart, "restart", "", "Restart policy to apply when a container exits (default \"unless-stopped\" with --detach, \"no\" otherwise)")
 	f.DurationVar(&c.tcpHalfCloseTimeout, "tcp-half-close-timeout", 0, "how long each TCP forward waits for the other side after one side closes its write half (socat -t); 0 keeps socat's 0.5s default")
 	f.DurationVar(&c.udpTimeout, "udp-timeout", portforward.DefaultUDPTimeout, "idle timeout applied to each UDP forward (socat -T)")
@@ -144,6 +147,7 @@ func (c *PortForwardCommand) AutocompleteFlags() complete.Flags {
 			"--pull":                      complete.PredictSet("always", "missing", "never"),
 			"--restart":                   complete.PredictSet("no", "always", "unless-stopped", "on-failure"),
 			"--skip-preflight":            complete.PredictNothing,
+			"--source-range":              complete.PredictAnything,
 			"--tcp-half-close-timeout":    complete.PredictAnything,
 			"--udp-timeout":               complete.PredictAnything,
 		},
@@ -200,6 +204,7 @@ func (c *PortForwardCommand) Run(args []string) int {
 		ProjectName:         c.projectName,
 		Pull:                c.pull,
 		SkipPreflight:       c.skipPreflight,
+		SourceRange:         c.sourceRange,
 		TCPHalfCloseTimeout: c.tcpHalfCloseTimeout,
 		UDPTimeout:          c.udpTimeout,
 		Logger:              logger,

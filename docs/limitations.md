@@ -22,6 +22,7 @@
 | Swarm services (replicas, routing mesh) | **No** | Use the routing mesh's published port instead. |
 | UDP services | Yes | Suffix spec with `/udp` (e.g., `53:53/udp`). See [UDP forwarding](#udp-forwarding). |
 | SCTP or other non-TCP/UDP protocols | **No** | Only TCP and UDP are supported. |
+| More than one `--source-range` | **No** | One range per forward. See [Source range](#source-range). |
 
 ## Unsupported network modes
 
@@ -135,7 +136,16 @@ This doesn't help with rootless Docker, whose daemon can't bind ports below 1024
 - **Target IP changes on the default `bridge` network:** on a user-defined network the helper reaches the target by container name, so a target restart that changes its IP is handled. On the default `bridge` network there is no embedded DNS, so the helper dials the target's IP and stops working if the target comes back with a different IP. The helper records that IP in its labels, `docker port-forward list --stale` reports it, and re-running the same `docker port-forward --detach` command replaces it. Nothing replaces it automatically in the background.
 - **Recreated targets:** if the target is recreated rather than restarted (for example `docker compose up` after a config change), a helper on a user-defined network keeps forwarding to the new container by name. Its `com.dokku.port-forward.target` label still holds the old container ID, though, so `docker port-forward cleanup --target <new>` won't match it. Use `cleanup --name <helper>` or plain `cleanup` instead. On the default `bridge` network the helper is stale; re-running the forward removes it if it holds a requested host port.
 - **Bind addresses must be IP literals:** the `ADDRESS` in an `ADDRESS:LOCAL:REMOTE` port spec and each `--address` value must be an IP address (IPv6 in brackets in port specs), `localhost`, or `*` for every interface. Hostnames are rejected.
+- **Source range:** see [below](#source-range).
 - **No TLS termination:** traffic is proxied raw. If the target serves TLS, clients should connect using its TLS settings; the helper does no re-encoding.
+
+## Source range
+
+`--source-range` is enforced by socat's `range` option inside the helper, which brings three limits:
+
+- **One range per forward.** socat honors a single `range` option per listener, so `--source-range` takes one IP address or CIDR. For networks that don't share a prefix, restrict the published port with a host firewall, such as rules in Docker's `DOCKER-USER` chain.
+- **The address checked may be the gateway's.** Connections from other hosts that Docker delivers by NAT keep the client's address. Connections to a host port on the loopback interface, and IPv6 connections to a helper without IPv6, go through Docker's userland proxy and reach the helper from the network's gateway address (for example `172.17.0.1`), so the range has to include the gateway for those to be accepted.
+- **An IPv6 range needs IPv6 traffic.** An IPv6 range makes each listener accept IPv6 only. On a network without IPv6, every connection reaches the helper over IPv4 and is refused.
 
 ## Reporting new limitations
 
