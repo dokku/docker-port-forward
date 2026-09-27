@@ -47,6 +47,9 @@ const (
 	// LabelTargetAddress is what the helper dials: the target's container
 	// name on a user-defined network, or its IP on the default bridge.
 	LabelTargetAddress = "com.dokku.port-forward.target-address"
+	// LabelSourceRange is the only range of client addresses the helper
+	// accepts connections from. Unset when every client is accepted.
+	LabelSourceRange = "com.dokku.port-forward.source-range"
 )
 
 // Pull policies for the helper image.
@@ -108,7 +111,10 @@ type ForwardInput struct {
 	// side after one side closes its write half (socat -t). Zero keeps
 	// socat's 0.5s default.
 	TCPHalfCloseTimeout time.Duration
-	Logger              Logger
+	// SourceRange is the only range of client addresses the helper accepts
+	// connections from. The zero Prefix accepts every client.
+	SourceRange netip.Prefix
+	Logger      Logger
 }
 
 // ForwardResult describes what StartForward produced.
@@ -177,8 +183,10 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 
 	// 1. Idempotency: if an existing helper for this target shares any
 	// (local, remote) pair with our request, exit 0 and reuse it, unless it
-	// no longer reaches the target, in which case replace it.
+	// no longer reaches the target or accepts a different range of clients,
+	// in which case replace it.
 	removedHelpers := 0
+	wantedRange := sourceRangeLabel(in.SourceRange)
 	for {
 		existing, match, err := findOverlappingHelper(ctx, in.Client, in.Target.ContainerID, pairs)
 		if err != nil {
@@ -192,7 +200,13 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		if err != nil {
 			return ForwardResult{}, err
 		}
-		if !stale {
+		if stale {
+			in.Logger.Info(fmt.Sprintf("Replacing stale helper %q: %s", name, reason))
+		} else if currentRange := existing.Labels[LabelSourceRange]; currentRange != wantedRange {
+			// reusing it would leave the old range in force
+			in.Logger.Info(fmt.Sprintf("Replacing helper %q: source range changed from %s to %s",
+				name, describeSourceRange(currentRange), describeSourceRange(wantedRange)))
+		} else {
 			in.Logger.Info(fmt.Sprintf("Existing helper %q already forwards %s for target %s; no action taken.",
 				name, renderPairs(pairs), shortID(in.Target.ContainerID)))
 			return ForwardResult{
@@ -202,9 +216,8 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 				Existing:   true,
 			}, nil
 		}
-		in.Logger.Info(fmt.Sprintf("Replacing stale helper %q: %s", name, reason))
 		if RemoveHelpers(ctx, in.Client, []string{existing.ID}, in.Logger) != 1 {
-			return ForwardResult{}, fmt.Errorf("error removing stale helper %q", name)
+			return ForwardResult{}, fmt.Errorf("error removing helper %q", name)
 		}
 		removedHelpers++
 	}
@@ -269,6 +282,7 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		LogConfig:           in.LogConfig,
 		UDPTimeout:          in.UDPTimeout,
 		TCPHalfCloseTimeout: in.TCPHalfCloseTimeout,
+		SourceRange:         in.SourceRange,
 	})
 
 	resp, err := in.Client.ContainerCreate(ctx, cfg, hostCfg, &network.NetworkingConfig{}, nil, name)
@@ -555,6 +569,26 @@ type helperConfig struct {
 	// TCPHalfCloseTimeout is socat's -t for TCP forwards. Zero keeps
 	// socat's default.
 	TCPHalfCloseTimeout time.Duration
+	// SourceRange is the only range of client addresses each socat listener
+	// accepts. The zero Prefix accepts every client.
+	SourceRange netip.Prefix
+}
+
+// sourceRangeLabel is the LabelSourceRange value for a range: "" for the
+// zero Prefix, which leaves the label unset.
+func sourceRangeLabel(prefix netip.Prefix) string {
+	if !prefix.IsValid() {
+		return ""
+	}
+	return prefix.String()
+}
+
+// describeSourceRange names a LabelSourceRange value in a log message.
+func describeSourceRange(label string) string {
+	if label == "" {
+		return "any address"
+	}
+	return label
 }
 
 // buildHelperContainerConfig prepares the Docker Config + HostConfig for the
@@ -597,16 +631,20 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 		halfClose = "-t " + strconv.FormatFloat(h.TCPHalfCloseTimeout.Seconds(), 'f', -1, 64) + " "
 	}
 
+	// socat refuses a client outside the range itself, closing the
+	// connection before anything is forwarded
+	rangeOpts := socatRangeOptions(h.SourceRange)
+
 	var shCmd strings.Builder
 	shCmd.WriteString("trap 'kill 0' EXIT; ")
 	for _, k := range keys {
 		switch k.proto {
 		case ProtocolUDP:
-			fmt.Fprintf(&shCmd, "socat -T %d UDP-LISTEN:%d,fork,reuseaddr UDP:%s:%d & ",
-				udpSeconds, k.remote, h.TargetAddress, k.remote)
+			fmt.Fprintf(&shCmd, "socat -T %d UDP-LISTEN:%d,fork,reuseaddr%s UDP:%s:%d & ",
+				udpSeconds, k.remote, rangeOpts, h.TargetAddress, k.remote)
 		default:
-			fmt.Fprintf(&shCmd, "socat %sTCP-LISTEN:%d,fork,reuseaddr TCP:%s:%d & ",
-				halfClose, k.remote, h.TargetAddress, k.remote)
+			fmt.Fprintf(&shCmd, "socat %sTCP-LISTEN:%d,fork,reuseaddr%s TCP:%s:%d & ",
+				halfClose, k.remote, rangeOpts, h.TargetAddress, k.remote)
 		}
 	}
 	shCmd.WriteString("wait")
@@ -651,6 +689,9 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 		LabelPorts:         EncodePortPairs(h.Pairs),
 		LabelBindings:      EncodeBindings(h.Pairs, h.Addresses),
 		LabelAddresses:     strings.Join(addressList, ","),
+	}
+	if sourceRange := sourceRangeLabel(h.SourceRange); sourceRange != "" {
+		labels[LabelSourceRange] = sourceRange
 	}
 	for k, v := range h.ExtraLabels {
 		labels[k] = v

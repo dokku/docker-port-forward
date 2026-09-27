@@ -50,6 +50,9 @@ type Helper struct {
 	// TargetAddress is what the helper dials: the target's container name
 	// on a user-defined network, or its IP on the default bridge.
 	TargetAddress string
+	// SourceRange is the only range of client addresses the helper accepts
+	// connections from, empty when it accepts every client.
+	SourceRange string
 	// Stale is true when the helper can no longer reach its target: the
 	// target container is gone, has left TargetNetwork, or (for helpers
 	// that dial an IP) is running with a different IP. A stopped target is
@@ -133,6 +136,7 @@ func findHelpers(ctx context.Context, cli internal.DockerClientInterface, name, 
 			TargetName:    s.Labels[internal.LabelTargetName],
 			TargetNetwork: s.Labels[internal.LabelTargetNetwork],
 			TargetAddress: s.Labels[internal.LabelTargetAddress],
+			SourceRange:   s.Labels[internal.LabelSourceRange],
 			Stale:         stale,
 			StaleReason:   reason,
 		})

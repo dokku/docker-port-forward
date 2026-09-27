@@ -126,13 +126,17 @@ func (c *PortForwardCleanupCommand) Run(args []string) int {
 }
 
 // formatHelperRow renders one helper for `cleanup` and `list` output. The
-// detailed form adds the network and address the helper dials. A stale
-// helper always ends with its stale reason.
+// detailed form adds the network and address the helper dials, and the
+// source range when the helper has one. A stale helper always ends with its
+// stale reason.
 func formatHelperRow(h portforward.Helper, detailed bool) string {
 	row := fmt.Sprintf("%s  name=%s target=%s ports=%s",
 		truncateID(h.ID), h.Name, truncateID(h.Target), h.Ports)
 	if detailed {
 		row += fmt.Sprintf(" bindings=%s network=%s address=%s", h.Bindings, h.TargetNetwork, h.TargetAddress)
+		if h.SourceRange != "" {
+			row += fmt.Sprintf(" source-range=%s", h.SourceRange)
+		}
 	}
 	if h.Stale {
 		row += fmt.Sprintf(" stale=%q", h.StaleReason)

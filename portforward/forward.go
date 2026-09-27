@@ -87,6 +87,11 @@ type Options struct {
 	// TCP forward waits for the other side after one side closes its write
 	// half (socat -t). Zero keeps socat's 0.5s default.
 	TCPHalfCloseTimeout time.Duration
+	// SourceRange mirrors --source-range: an IP address or CIDR, the only
+	// clients the helper accepts connections from. A bare address is a
+	// range of one. Only one range may be given, as socat, which enforces
+	// it, honors one per listener. Empty accepts every client.
+	SourceRange string
 	// Client is the Docker client to use. When nil, a client is created
 	// from the environment (DOCKER_HOST etc.) and closed before returning.
 	// A caller-supplied client is never closed.
@@ -157,6 +162,11 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("invalid --tcp-half-close-timeout value %q: must not be negative", opts.TCPHalfCloseTimeout.String())
 	}
 
+	sourceRange, err := internal.ParseSourceRange(opts.SourceRange)
+	if err != nil {
+		return Result{}, err
+	}
+
 	parsedTarget, err := internal.ParseTarget(opts.Target)
 	if err != nil {
 		return Result{}, err
@@ -222,6 +232,7 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 		UDPTimeout:     opts.UDPTimeout,
 
 		TCPHalfCloseTimeout: opts.TCPHalfCloseTimeout,
+		SourceRange:         sourceRange,
 		Logger:              logger,
 	})
 	if err != nil {
