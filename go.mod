@@ -3,7 +3,7 @@ module github.com/dokku/docker-port-forward
 go 1.26.2
 
 require (
-	github.com/compose-spec/compose-go/v2 v2.15.0
+	github.com/compose-spec/compose-go/v2 v2.16.1
 	github.com/josegonzalez/cli-skeleton v0.25.0
 	github.com/mitchellh/cli v1.1.5
 	github.com/opencontainers/image-spec v1.1.1
