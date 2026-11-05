@@ -186,6 +186,7 @@ teardown() {
     if [ -n "$TARGET" ]; then
       docker rm -f "$TARGET" >/dev/null 2>&1 || true
     fi
+    docker network ls -q --filter "label=${INTEGRATION_LABEL}=true" | xargs -r docker network rm >/dev/null 2>&1 || true
   fi
 }
 
@@ -643,6 +644,88 @@ teardown() {
   assert_output_contains "network=bridge"
   assert_output_contains "address=$IP"
   refute_output_contains "stale="
+}
+
+# connect_target_to_network creates a network for this test and attaches the
+# target to it. Extra arguments are passed to `docker network create`.
+connect_target_to_network() {
+  local network="$1"
+  shift
+  docker network create --label "${INTEGRATION_LABEL}=true" "$@" "$network" >/dev/null
+  docker network connect "$network" "$TARGET"
+}
+
+@test "integration: an internal network the target is on is skipped" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-internal-$$"
+  # sorts before every other network, so it would be picked were internal
+  # networks not skipped
+  connect_target_to_network "a-dpf-bats-internal-$$" --internal
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run "$DOCKER_PORT_FORWARD" port-forward list --name "$NAME"
+  assert_success
+  assert_output_contains "network=bridge"
+
+  run docker port "$NAME"
+  assert_success
+  assert_output_contains ":${PORT}"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
+  fi
+}
+
+@test "integration: --network joins the named network" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-network-$$"
+  connect_target_to_network "a-dpf-bats-network-$$"
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --network bridge \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_success
+
+  run "$DOCKER_PORT_FORWARD" port-forward list --name "$NAME"
+  assert_success
+  assert_output_contains "network=bridge"
+
+  if ! wait_http "http://127.0.0.1:${PORT}/" 10; then
+    flunk "curl to forwarded port ${PORT} never succeeded"
+  fi
+}
+
+@test "integration: --network refuses an internal network" {
+  require_docker
+  start_nginx_target
+  PORT=$(free_port)
+  NAME="dpf-bats-network-internal-$$"
+  connect_target_to_network "dpf-bats-network-internal-$$" --internal
+
+  run "$DOCKER_PORT_FORWARD" port-forward \
+    --detach \
+    --name "$NAME" \
+    --network "dpf-bats-network-internal-$$" \
+    --label "${INTEGRATION_LABEL}=true" \
+    "container/$TARGET" "$PORT:80"
+  assert_failure
+  assert_output_contains "is internal"
+
+  run docker container inspect "$NAME"
+  assert_failure
 }
 
 @test "integration: bridge IP drift is reported and fixed by re-running the forward" {

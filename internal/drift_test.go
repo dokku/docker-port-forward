@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	dockerClient "github.com/moby/moby/client"
@@ -60,6 +61,7 @@ func TestCheckHelper(t *testing.T) {
 		name       string
 		helper     container.Summary
 		containers map[string]container.InspectResponse
+		internal   []string
 		wantStale  bool
 		wantReason string
 	}{
@@ -120,10 +122,19 @@ func TestCheckHelper(t *testing.T) {
 			wantStale:  true,
 			wantReason: `target is no longer attached to network "my-net"`,
 		},
+		{
+			name:       "name on internal network",
+			helper:     helperFor("my-net", "target"),
+			containers: map[string]container.InspectResponse{"target": targetOn("my-net", "10.0.0.9", true)},
+			internal:   []string{"my-net"},
+			wantStale:  true,
+			wantReason: `network "my-net" is internal, so none of its ports are published`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cli := &mockDockerClient{containerInspect: inspectByKey(tc.containers)}
+			cli := internalNetworks(tc.internal...)
+			cli.containerInspect = inspectByKey(tc.containers)
 			stale, reason, err := CheckHelper(context.Background(), cli, tc.helper)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -143,6 +154,33 @@ func TestCheckHelper_InspectErrorIsReturned(t *testing.T) {
 	}
 	if _, _, err := CheckHelper(context.Background(), cli, helperFor("bridge", "172.17.0.5")); err == nil {
 		t.Fatal("expected inspect error to be returned")
+	}
+}
+
+func TestCheckHelper_NetworkInspectErrorIsReturned(t *testing.T) {
+	cli := &mockDockerClient{
+		networkInspect: func(ctx context.Context, id string) (network.Inspect, error) {
+			return network.Inspect{}, fmt.Errorf("connection refused")
+		},
+	}
+	if _, _, err := CheckHelper(context.Background(), cli, helperFor("my-net", "target")); err == nil {
+		t.Fatal("expected network inspect error to be returned")
+	}
+}
+
+func TestCheckHelper_MissingNetworkIsLeftToAttachment(t *testing.T) {
+	cli := &mockDockerClient{
+		networkInspect: func(ctx context.Context, id string) (network.Inspect, error) {
+			return network.Inspect{}, cerrdefs.ErrNotFound
+		},
+		containerInspect: inspectByKey(map[string]container.InspectResponse{"target": targetOn("other", "10.1.0.9", true)}),
+	}
+	stale, reason, err := CheckHelper(context.Background(), cli, helperFor("my-net", "target"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !stale || reason != `target is no longer attached to network "my-net"` {
+		t.Fatalf("got stale=%v reason=%q", stale, reason)
 	}
 }
 
@@ -216,6 +254,136 @@ func TestStartForward_ReplacesStaleOverlappingHelper(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected replacement log line, got %v", logger.info)
+	}
+}
+
+func TestStartForward_RequestedNetwork(t *testing.T) {
+	cases := []struct {
+		name         string
+		helperNet    string
+		requested    string
+		wantReplaced bool
+		logLine      string
+	}{
+		{
+			name:      "same network is reused",
+			helperNet: "bridge",
+			requested: "bridge",
+			logLine:   `Existing helper "helper" already forwards`,
+		},
+		{
+			name:         "other network is replaced",
+			helperNet:    "my-net",
+			requested:    "bridge",
+			wantReplaced: true,
+			logLine:      `Replacing helper "helper": network changed from "my-net" to "bridge"`,
+		},
+		{
+			name:      "no network requested reuses any",
+			helperNet: "my-net",
+			logLine:   `Existing helper "helper" already forwards`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			port := freeTCPPort(t)
+			address := "target"
+			if tc.helperNet == "bridge" {
+				address = "172.17.0.5"
+			}
+			existing := helperFor(tc.helperNet, address)
+			existing.Labels[LabelPorts] = fmt.Sprintf("%d:80", port)
+
+			info := targetOn("bridge", "172.17.0.5", true)
+			info.NetworkSettings.Networks["my-net"] = &network.EndpointSettings{IPAddress: netip.MustParseAddr("10.0.0.5")}
+
+			removed := map[string]bool{}
+			var created *container.Config
+			var createdHost *container.HostConfig
+			cli := &mockDockerClient{
+				containerInspect: func(ctx context.Context, id string) (container.InspectResponse, error) {
+					if id == "target-sha" || id == "target" {
+						return info, nil
+					}
+					return container.InspectResponse{ID: id, State: &container.State{Running: true}}, nil
+				},
+				containerList: func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+					if removed[existing.ID] {
+						return nil, nil
+					}
+					return []container.Summary{existing}, nil
+				},
+				containerRemove: func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
+					removed[id] = true
+					return nil
+				},
+				containerCreate: func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, name string) (container.CreateResponse, error) {
+					created, createdHost = config, hostConfig
+					return container.CreateResponse{ID: "new-helper"}, nil
+				},
+			}
+
+			logger := &captureLogger{}
+			result, err := StartForward(context.Background(), ForwardInput{
+				Client:    cli,
+				Target:    ResolvedTarget{ContainerID: "target-sha", ContainerName: "target"},
+				Pairs:     []PortPair{{LocalPort: port, RemotePort: 80}},
+				Addresses: []string{"127.0.0.1"},
+				Detach:    true,
+				Network:   tc.requested,
+				Logger:    logger,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantReplaced != removed[existing.ID] || tc.wantReplaced != (created != nil) || result.Existing == tc.wantReplaced {
+				t.Fatalf("expected replaced=%v, got removed=%v created=%v result=%+v", tc.wantReplaced, removed, created != nil, result)
+			}
+			if tc.wantReplaced {
+				if created.Labels[LabelTargetNetwork] != tc.requested || string(createdHost.NetworkMode) != tc.requested {
+					t.Fatalf("expected the new helper on %q, got label %q mode %q", tc.requested, created.Labels[LabelTargetNetwork], createdHost.NetworkMode)
+				}
+			}
+			found := false
+			for _, m := range logger.info {
+				if strings.Contains(m, tc.logLine) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected log line %q, got %v", tc.logLine, logger.info)
+			}
+		})
+	}
+}
+
+func TestStartForward_UnusableNetworkLeavesHelper(t *testing.T) {
+	removed := false
+	cli := internalNetworks("my-net")
+	cli.containerInspect = func(ctx context.Context, id string) (container.InspectResponse, error) {
+		return targetOn("my-net", "10.0.0.5", true), nil
+	}
+	cli.containerList = func(ctx context.Context, options dockerClient.ContainerListOptions) ([]container.Summary, error) {
+		return []container.Summary{helperFor("bridge", "172.17.0.5")}, nil
+	}
+	cli.containerRemove = func(ctx context.Context, id string, options dockerClient.ContainerRemoveOptions) error {
+		removed = true
+		return nil
+	}
+
+	_, err := StartForward(context.Background(), ForwardInput{
+		Client:    cli,
+		Target:    ResolvedTarget{ContainerID: "target-sha", ContainerName: "target"},
+		Pairs:     []PortPair{{LocalPort: 8080, RemotePort: 80}},
+		Addresses: []string{"127.0.0.1"},
+		Detach:    true,
+		Logger:    &captureLogger{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only on internal networks (my-net)") {
+		t.Fatalf("expected an internal networks error, got %v", err)
+	}
+	if removed {
+		t.Fatal("expected the existing helper to be left in place")
 	}
 }
 

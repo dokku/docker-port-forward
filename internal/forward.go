@@ -114,7 +114,11 @@ type ForwardInput struct {
 	// SourceRange is the only range of client addresses the helper accepts
 	// connections from. The zero Prefix accepts every client.
 	SourceRange netip.Prefix
-	Logger      Logger
+	// Network is the name of the target network the helper joins. It must
+	// be one the target is attached to and must not be internal. When empty
+	// a network is picked, see pickTargetNetwork.
+	Network string
+	Logger  Logger
 }
 
 // ForwardResult describes what StartForward produced.
@@ -181,10 +185,23 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 		return ForwardResult{}, err
 	}
 
+	// Pick the network the helper will attach to and learn what socat dials
+	// on it. Done before anything is removed, so a target the helper can't
+	// publish from leaves an existing helper in place.
+	info, err := in.Client.ContainerInspect(ctx, in.Target.ContainerID)
+	if err != nil {
+		return ForwardResult{}, fmt.Errorf("error inspecting target: %v", err)
+	}
+	networkName, targetAddr, err := pickTargetNetwork(ctx, in.Client, info, in.Network)
+	if err != nil {
+		return ForwardResult{}, err
+	}
+
 	// 1. Idempotency: if an existing helper for this target shares any
 	// (local, remote) pair with our request, exit 0 and reuse it, unless it
-	// no longer reaches the target or accepts a different range of clients,
-	// in which case replace it.
+	// no longer reaches the target, accepts a different range of clients or
+	// is on a network other than the one requested, in which case replace
+	// it.
 	removedHelpers := 0
 	wantedRange := sourceRangeLabel(in.SourceRange)
 	for {
@@ -206,6 +223,9 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 			// reusing it would leave the old range in force
 			in.Logger.Info(fmt.Sprintf("Replacing helper %q: source range changed from %s to %s",
 				name, describeSourceRange(currentRange), describeSourceRange(wantedRange)))
+		} else if currentNetwork := existing.Labels[LabelTargetNetwork]; in.Network != "" && currentNetwork != in.Network {
+			in.Logger.Info(fmt.Sprintf("Replacing helper %q: network changed from %q to %q",
+				name, currentNetwork, in.Network))
 		} else {
 			in.Logger.Info(fmt.Sprintf("Existing helper %q already forwards %s for target %s; no action taken.",
 				name, renderPairs(pairs), shortID(in.Target.ContainerID)))
@@ -247,17 +267,6 @@ func StartForward(ctx context.Context, in ForwardInput) (ForwardResult, error) {
 	}
 
 	if err := ensureHelperImage(ctx, in.Client, in.HelperImage, in.PullPolicy, in.Logger); err != nil {
-		return ForwardResult{}, err
-	}
-
-	// 3. Pick a network the helper will attach to and learn the target's IP
-	// on that network; socat talks to that IP.
-	info, err := in.Client.ContainerInspect(ctx, in.Target.ContainerID)
-	if err != nil {
-		return ForwardResult{}, fmt.Errorf("error inspecting target: %v", err)
-	}
-	networkName, targetAddr, err := pickTargetNetwork(info)
-	if err != nil {
 		return ForwardResult{}, err
 	}
 
@@ -722,14 +731,22 @@ func buildHelperContainerConfig(h helperConfig) (*container.Config, *container.H
 }
 
 // pickTargetNetwork chooses a network to attach the helper to and returns the
-// address socat should connect to on that network. User-defined networks are
-// preferred over the default bridge because Docker's embedded DNS lets the
-// helper reach the target by container name, so the forward keeps working
-// when the target restarts with a new IP. On the default bridge there is no
-// embedded DNS, so the target's IP is used.
-func pickTargetNetwork(info container.InspectResponse) (networkName string, targetAddr string, err error) {
+// address socat should connect to on that network. A requested network is
+// used as long as the target is attached to it and docker can publish ports
+// from it.
+//
+// Otherwise user-defined networks are preferred over the default bridge
+// because Docker's embedded DNS lets the helper reach the target by container
+// name, so the forward keeps working when the target restarts with a new IP.
+// On the default bridge there is no embedded DNS, so the target's IP is used.
+// Internal networks are skipped: Docker publishes no ports from a container
+// whose only network is internal, so a helper on one forwards nothing.
+func pickTargetNetwork(ctx context.Context, cli DockerClientInterface, info container.InspectResponse, requested string) (networkName string, targetAddr string, err error) {
 	if info.NetworkSettings == nil || len(info.NetworkSettings.Networks) == 0 {
 		return "", "", errors.New("target container has no networks")
+	}
+	if requested != "" {
+		return pickRequestedNetwork(ctx, cli, info, requested)
 	}
 	var userDefined []string
 	for name := range info.NetworkSettings.Networks {
@@ -739,22 +756,82 @@ func pickTargetNetwork(info container.InspectResponse) (networkName string, targ
 		userDefined = append(userDefined, name)
 	}
 	sort.Strings(userDefined)
-	containerName := strings.TrimPrefix(info.Name, "/")
-	if len(userDefined) > 0 {
-		for _, name := range userDefined {
-			endpoint := info.NetworkSettings.Networks[name]
-			if endpoint != nil && endpoint.IPAddress.IsValid() {
-				if containerName != "" {
-					return name, containerName, nil
-				}
-				return name, endpoint.IPAddress.String(), nil
-			}
+	var internal []string
+	for _, name := range userDefined {
+		addr, ok := targetAddress(info, name)
+		if !ok {
+			continue
 		}
+		isInternal, err := internalNetwork(ctx, cli, name)
+		if err != nil {
+			return "", "", err
+		}
+		if isInternal {
+			internal = append(internal, name)
+			continue
+		}
+		return name, addr, nil
 	}
-	if endpoint, ok := info.NetworkSettings.Networks["bridge"]; ok && endpoint != nil && endpoint.IPAddress.IsValid() {
-		return "bridge", endpoint.IPAddress.String(), nil
+	if addr, ok := targetAddress(info, "bridge"); ok {
+		return "bridge", addr, nil
+	}
+	if len(internal) > 0 {
+		return "", "", fmt.Errorf("target container is only on internal networks (%s), from which docker publishes no ports", strings.Join(internal, ", "))
 	}
 	return "", "", errors.New("target container has no routable IP address")
+}
+
+// pickRequestedNetwork returns the requested network and the address socat
+// should connect to on it, or why the helper can't use it.
+func pickRequestedNetwork(ctx context.Context, cli DockerClientInterface, info container.InspectResponse, requested string) (string, string, error) {
+	if requested == "host" || requested == "none" {
+		return "", "", fmt.Errorf("network %q can't be used: the helper must share a bridge or user-defined network with the target", requested)
+	}
+	if !attachedTo(info, requested) {
+		return "", "", fmt.Errorf("target container is not attached to network %q", requested)
+	}
+	addr, ok := targetAddress(info, requested)
+	if !ok {
+		return "", "", fmt.Errorf("target container has no IP address on network %q", requested)
+	}
+	if requested != "bridge" {
+		isInternal, err := internalNetwork(ctx, cli, requested)
+		if err != nil {
+			return "", "", err
+		}
+		if isInternal {
+			return "", "", fmt.Errorf("network %q is internal, and docker publishes no ports from a container on an internal network", requested)
+		}
+	}
+	return requested, addr, nil
+}
+
+// targetAddress is what the helper dials on a network the target is on: its
+// container name on a user-defined network, and its IP on the default bridge
+// or when the target has no name. False when the target has no IP there.
+func targetAddress(info container.InspectResponse, networkName string) (string, bool) {
+	if info.NetworkSettings == nil {
+		return "", false
+	}
+	endpoint := info.NetworkSettings.Networks[networkName]
+	if endpoint == nil || !endpoint.IPAddress.IsValid() {
+		return "", false
+	}
+	containerName := strings.TrimPrefix(info.Name, "/")
+	if networkName != "bridge" && containerName != "" {
+		return containerName, true
+	}
+	return endpoint.IPAddress.String(), true
+}
+
+// internalNetwork reports whether a network is internal, which Docker
+// publishes no ports from.
+func internalNetwork(ctx context.Context, cli DockerClientInterface, networkName string) (bool, error) {
+	inspect, err := cli.NetworkInspect(ctx, networkName)
+	if err != nil {
+		return false, fmt.Errorf("error inspecting network %q: %v", networkName, err)
+	}
+	return inspect.Internal, nil
 }
 
 // findOverlappingHelper looks for an existing helper container for the same

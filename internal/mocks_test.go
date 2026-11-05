@@ -25,6 +25,7 @@ type mockDockerClient struct {
 	containerWait    func(ctx context.Context, id string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
 	imageInspect     func(ctx context.Context, id string) (image.InspectResponse, error)
 	imagePull        func(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error)
+	networkInspect   func(ctx context.Context, id string) (network.Inspect, error)
 }
 
 func (m *mockDockerClient) Close() error { return nil }
@@ -100,6 +101,13 @@ func (m *mockDockerClient) ImagePull(ctx context.Context, ref string, options do
 		return m.imagePull(ctx, ref, options)
 	}
 	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (m *mockDockerClient) NetworkInspect(ctx context.Context, id string) (network.Inspect, error) {
+	if m.networkInspect != nil {
+		return m.networkInspect(ctx, id)
+	}
+	return network.Inspect{}, nil
 }
 
 // captureLogger accumulates log lines for assertions.

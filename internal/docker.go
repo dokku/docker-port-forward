@@ -28,6 +28,7 @@ type DockerClientInterface interface {
 	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
 	ImageInspect(ctx context.Context, imageID string) (image.InspectResponse, error)
 	ImagePull(ctx context.Context, ref string, options dockerClient.ImagePullOptions) (io.ReadCloser, error)
+	NetworkInspect(ctx context.Context, networkID string) (network.Inspect, error)
 }
 
 // DockerClient wraps a Docker API client with the interface we use.
@@ -140,4 +141,13 @@ func (d *DockerClient) ImagePull(ctx context.Context, ref string, options docker
 		return nil, err
 	}
 	return rc, nil
+}
+
+// NetworkInspect inspects a network by ID or name.
+func (d *DockerClient) NetworkInspect(ctx context.Context, networkID string) (network.Inspect, error) {
+	res, err := d.cli.NetworkInspect(ctx, networkID, dockerClient.NetworkInspectOptions{})
+	if err != nil {
+		return network.Inspect{}, err
+	}
+	return res.Network, nil
 }
