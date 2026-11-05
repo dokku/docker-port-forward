@@ -61,6 +61,7 @@ Multiple port specs may be provided. If no port specs are given, the command pro
 | `--log-driver` | string | daemon default | Logging driver for the container. Same as `docker container create --log-driver`. Applies to the helper only, not the short-lived auto-detect probe. |
 | `--log-opt` | string (repeatable) | | Log driver options, in `key=value` form. Same as `docker container create --log-opt`. Not allowed with `--log-driver none`. |
 | `--name` | string | auto-generated | Name to assign to the helper container. When omitted, a name like `port-forward-<target>-<rand>` is generated. Use the name with `cleanup --name` to remove a specific forward. |
+| `--network` | string | first non-internal user-defined network, then `bridge` | The target network for the helper to join. The target must be attached to it, and it must not be internal, since Docker publishes no ports from a container on an internal network. See [Network](#network). |
 | `--profile` | string (repeatable) | | One or more Compose profiles to enable when resolving services. |
 | `--project-directory` | string | | Alternate Compose project directory. |
 | `-p, --project-name` | string | directory name | Compose project name; used when resolving `service/` or bare-name targets. |
@@ -85,7 +86,15 @@ If a running helper for the same target already covers any of the requested `(lo
 
 The exception is a stale helper, one that can no longer reach its target (see [`port-forward list`](#port-forward-list)). A stale helper is removed and replaced with a new one, so re-running the command fixes a forward whose target changed IP on the default `bridge` network. A running helper that holds a requested host port for a target container that no longer exists is also removed.
 
-A helper that accepts a different `--source-range` is replaced too, including one with no range when a range is requested and the other way around, since reusing it would leave the old range in force.
+A helper that accepts a different `--source-range` is replaced too, including one with no range when a range is requested and the other way around, since reusing it would leave the old range in force. So is one on a network other than the one `--network` names.
+
+## Network
+
+The helper joins one of the target's networks and dials the target there: by container name on a user-defined network, and by IP on the default `bridge`, which has no embedded DNS. The network is recorded in the `com.dokku.port-forward.target-network` label.
+
+Without `--network`, the first user-defined network in name order is used, falling back to `bridge`. Internal networks (`docker network create --internal`) are skipped, because Docker publishes no ports from a container whose only network is internal: a helper on one would start and forward nothing. A target that is only on internal networks is refused. A helper already on an internal network is reported as stale, and is replaced the next time the forward is run.
+
+`--network` names the network instead. The target must be attached to it, it must not be internal, and `host` and `none` are refused.
 
 ## Source range
 

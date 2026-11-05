@@ -66,6 +66,12 @@ type Options struct {
 	Labels map[string]string
 	// Name mirrors --name. Auto-generated when empty.
 	Name string
+	// Network mirrors --network: the name of the target network the helper
+	// joins. The target must be attached to it, and it must not be internal,
+	// since Docker publishes no ports from a container on an internal
+	// network. When empty the first non-internal user-defined network is
+	// used, falling back to the default bridge.
+	Network string
 	// Profiles mirrors --profile. Accepted for parity with the CLI;
 	// currently unused, as in the CLI.
 	Profiles []string
@@ -233,6 +239,7 @@ func Forward(ctx context.Context, opts Options) (Result, error) {
 
 		TCPHalfCloseTimeout: opts.TCPHalfCloseTimeout,
 		SourceRange:         sourceRange,
+		Network:             opts.Network,
 		Logger:              logger,
 	})
 	if err != nil {

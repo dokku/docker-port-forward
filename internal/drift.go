@@ -21,6 +21,8 @@ import (
 //   - When the helper dials an IP (the default bridge), it is stale if the
 //     target container no longer exists, is no longer attached to the
 //     network, or is running with a different IP.
+//   - Either way it is stale when its network is internal, since Docker
+//     publishes no ports from a container whose only network is internal.
 //
 // A stopped target is not stale: a name still resolves once it restarts,
 // and a new IP isn't known until it does.
@@ -29,6 +31,18 @@ func CheckHelper(ctx context.Context, cli DockerClientInterface, helper containe
 	networkName := helper.Labels[LabelTargetNetwork]
 	if address == "" || networkName == "" {
 		return false, "", nil
+	}
+
+	if networkName != "bridge" {
+		inspect, err := cli.NetworkInspect(ctx, networkName)
+		if err != nil && !isNotFound(err) {
+			return false, "", fmt.Errorf("error inspecting network %q: %v", networkName, err)
+		}
+		// a network that is gone is reported below, as the target no longer
+		// being attached to it
+		if err == nil && inspect.Internal {
+			return true, fmt.Sprintf("network %q is internal, so none of its ports are published", networkName), nil
+		}
 	}
 
 	targetIP, err := netip.ParseAddr(address)

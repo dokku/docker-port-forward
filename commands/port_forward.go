@@ -28,6 +28,7 @@ type PortForwardCommand struct {
 	logDriver           string
 	logOpts             []string
 	name                string
+	network             string
 	profiles            []string
 	projectDirectory    string
 	projectName         string
@@ -115,6 +116,7 @@ func (c *PortForwardCommand) FlagSet() *flag.FlagSet {
 	f.StringVar(&c.logDriver, "log-driver", "", "Logging driver for the container")
 	f.StringArrayVar(&c.logOpts, "log-opt", []string{}, "Log driver options")
 	f.StringVar(&c.name, "name", "", "name to assign to the helper container; auto-generated when omitted")
+	f.StringVar(&c.network, "network", "", "the target network for the helper to join; must not be internal (default: a non-internal network the target is on)")
 	f.StringSliceVar(&c.profiles, "profile", []string{}, "one or more compose profiles to enable")
 	f.StringVar(&c.projectDirectory, "project-directory", "", "the path to the compose project directory")
 	f.StringVarP(&c.projectName, "project-name", "p", "", "the compose project name")
@@ -142,6 +144,7 @@ func (c *PortForwardCommand) AutocompleteFlags() complete.Flags {
 			"--log-opt":                   complete.PredictAnything,
 			"--name":                      complete.PredictAnything,
 			"--profile":                   complete.PredictAnything,
+			"--network":                   complete.PredictAnything,
 			"--project-directory":         complete.PredictDirs("*"),
 			"--project-name":              complete.PredictAnything,
 			"--pull":                      complete.PredictSet("always", "missing", "never"),
@@ -199,6 +202,7 @@ func (c *PortForwardCommand) Run(args []string) int {
 		LogDriver:           c.logDriver,
 		LogOpts:             parseLogOptFlags(c.logOpts),
 		Name:                c.name,
+		Network:             c.network,
 		Profiles:            c.profiles,
 		ProjectDirectory:    c.projectDirectory,
 		ProjectName:         c.projectName,

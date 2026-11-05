@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -357,7 +358,7 @@ func TestPickTargetNetwork_UserDefinedUsesContainerName(t *testing.T) {
 			},
 		},
 	}
-	name, addr, err := pickTargetNetwork(info)
+	name, addr, err := pickTargetNetwork(context.Background(), &mockDockerClient{}, info, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +376,7 @@ func TestPickTargetNetwork_BridgeUsesIPEvenWithName(t *testing.T) {
 			},
 		},
 	}
-	name, addr, err := pickTargetNetwork(info)
+	name, addr, err := pickTargetNetwork(context.Background(), &mockDockerClient{}, info, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -394,7 +395,7 @@ func TestPickTargetNetwork_PrefersUserDefined(t *testing.T) {
 			},
 		},
 	}
-	name, addr, err := pickTargetNetwork(info)
+	name, addr, err := pickTargetNetwork(context.Background(), &mockDockerClient{}, info, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -414,7 +415,7 @@ func TestPickTargetNetwork_BridgeFallback(t *testing.T) {
 			},
 		},
 	}
-	name, addr, err := pickTargetNetwork(info)
+	name, addr, err := pickTargetNetwork(context.Background(), &mockDockerClient{}, info, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -429,8 +430,112 @@ func TestPickTargetNetwork_NoUsable(t *testing.T) {
 			Networks: map[string]*network.EndpointSettings{},
 		},
 	}
-	if _, _, err := pickTargetNetwork(info); err == nil {
+	if _, _, err := pickTargetNetwork(context.Background(), &mockDockerClient{}, info, ""); err == nil {
 		t.Fatal("expected error with no networks")
+	}
+}
+
+// internalNetworks is a mock client whose NetworkInspect reports the named
+// networks as internal and every other network as not.
+func internalNetworks(names ...string) *mockDockerClient {
+	return &mockDockerClient{
+		networkInspect: func(ctx context.Context, id string) (network.Inspect, error) {
+			return network.Inspect{Network: network.Network{Name: id, Internal: slices.Contains(names, id)}}, nil
+		},
+	}
+}
+
+// linkedTarget is a target on the default bridge and on an internal network
+// that sorts before every other network, as a dokku service linked to an app is.
+func linkedTarget() container.InspectResponse {
+	return container.InspectResponse{
+		Name: "/my-target",
+		NetworkSettings: &container.NetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"bridge":     {IPAddress: netip.MustParseAddr("172.17.0.5")},
+				"a-internal": {IPAddress: netip.MustParseAddr("172.18.0.5")},
+			},
+		},
+	}
+}
+
+func TestPickTargetNetwork_SkipsInternal(t *testing.T) {
+	name, addr, err := pickTargetNetwork(context.Background(), internalNetworks("a-internal"), linkedTarget(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "bridge" || addr != "172.17.0.5" {
+		t.Fatalf("expected bridge/172.17.0.5, got %q %q", name, addr)
+	}
+}
+
+func TestPickTargetNetwork_SkipsInternalForUserDefined(t *testing.T) {
+	info := linkedTarget()
+	info.NetworkSettings.Networks["b-net"] = &network.EndpointSettings{IPAddress: netip.MustParseAddr("10.0.0.5")}
+	name, addr, err := pickTargetNetwork(context.Background(), internalNetworks("a-internal"), info, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "b-net" || addr != "my-target" {
+		t.Fatalf("expected b-net/my-target, got %q %q", name, addr)
+	}
+}
+
+func TestPickTargetNetwork_OnlyInternal(t *testing.T) {
+	info := linkedTarget()
+	delete(info.NetworkSettings.Networks, "bridge")
+	_, _, err := pickTargetNetwork(context.Background(), internalNetworks("a-internal"), info, "")
+	if err == nil || !strings.Contains(err.Error(), "only on internal networks (a-internal)") {
+		t.Fatalf("expected an internal networks error, got %v", err)
+	}
+}
+
+func TestPickTargetNetwork_NetworkInspectError(t *testing.T) {
+	cli := &mockDockerClient{
+		networkInspect: func(ctx context.Context, id string) (network.Inspect, error) {
+			return network.Inspect{}, errors.New("boom")
+		},
+	}
+	if _, _, err := pickTargetNetwork(context.Background(), cli, linkedTarget(), ""); err == nil {
+		t.Fatal("expected the network inspect error")
+	}
+}
+
+func TestPickTargetNetwork_Requested(t *testing.T) {
+	info := linkedTarget()
+	info.NetworkSettings.Networks["b-net"] = &network.EndpointSettings{IPAddress: netip.MustParseAddr("10.0.0.5")}
+	info.NetworkSettings.Networks["no-ip"] = &network.EndpointSettings{}
+
+	tests := []struct {
+		requested string
+		network   string
+		addr      string
+		err       string
+	}{
+		{requested: "bridge", network: "bridge", addr: "172.17.0.5"},
+		{requested: "b-net", network: "b-net", addr: "my-target"},
+		{requested: "a-internal", err: `network "a-internal" is internal`},
+		{requested: "missing", err: `not attached to network "missing"`},
+		{requested: "no-ip", err: `no IP address on network "no-ip"`},
+		{requested: "host", err: `network "host" can't be used`},
+		{requested: "none", err: `network "none" can't be used`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.requested, func(t *testing.T) {
+			name, addr, err := pickTargetNetwork(context.Background(), internalNetworks("a-internal"), info, tt.requested)
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("expected error containing %q, got %v", tt.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if name != tt.network || addr != tt.addr {
+				t.Fatalf("expected %s/%s, got %q %q", tt.network, tt.addr, name, addr)
+			}
+		})
 	}
 }
 

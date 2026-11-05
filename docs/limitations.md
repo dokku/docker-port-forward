@@ -11,6 +11,7 @@
 | Container on `network_mode: host` | **No** | Use the host's own networking; no forward needed. |
 | Container on `network_mode: none` | **No** | Attach the container to a bridge first. |
 | Container on `network_mode: container:<other>` | Yes (via the other container's network) | — |
+| Container on an internal network only | **No** | Attach the target to a non-internal network. See [Internal networks](#internal-networks). |
 | Container on a `macvlan` or `ipvlan` network | **Sometimes** | See [Macvlan / ipvlan](#macvlan--ipvlan). |
 | Container on a Swarm overlay network | **No** | Publish via `docker service update --publish-add`. |
 | Remote Docker daemon (`DOCKER_HOST=tcp://…`) | **No (host-binding)** | Run the plugin on the host that runs the daemon. |
@@ -38,11 +39,15 @@ The target has no networking at all. The helper has nowhere to connect. Reconnec
 
 Targets that share another container's netns work, but the helper attaches to whichever network the *outer* container is on. Make sure the outer container exposes the remote port on a reachable interface (not loopback-only).
 
+### Internal networks
+
+Docker publishes no ports from a container whose only network is internal (`docker network create --internal`), since such a network has no gateway to the host. A helper on one would start and forward nothing, so internal networks are skipped when the helper's network is picked, and refused when `--network` names one. A target on an internal network and on any other network is forwarded through the other one; a target only on internal networks is refused. Attach it to a non-internal network (`docker network connect bridge <target>`) and retry.
+
 ### Macvlan / ipvlan
 
 Macvlan and ipvlan networks often do not permit the Docker host itself to reach containers attached to them (this is a well-known Linux kernel limitation: the host cannot speak to macvlan endpoints on the same physical interface). The helper typically *is* reachable because it is placed on the same macvlan network, but the host's `-p` publish entry ends up bound to a virtual interface the host kernel can't route back to. If the published port works from the LAN but not from the Docker host itself, this is why.
 
-**Workaround:** add a secondary plain `bridge` network to the target (`docker network connect bridge <target>`) and let `docker-port-forward` pick that one (it prefers user-defined networks; add `--address 0.0.0.0` (IPv4) or `--address '*'` (IPv4 and IPv6) if you need LAN reach).
+**Workaround:** add a secondary plain `bridge` network to the target (`docker network connect bridge <target>`) and pass `--network bridge` (without it a user-defined network is preferred; add `--address 0.0.0.0` (IPv4) or `--address '*'` (IPv4 and IPv6) if you need LAN reach).
 
 ### Swarm overlay networks
 
