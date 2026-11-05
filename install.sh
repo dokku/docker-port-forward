@@ -4,10 +4,10 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/dokku/docker-port-forward/main/install.sh | sh
-#   VERSION=0.0.1 curl -fsSL https://raw.githubusercontent.com/dokku/docker-port-forward/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/dokku/docker-port-forward/main/install.sh | VERSION=0.7.0 sh
 #
 # Environment variables:
-#   VERSION    Release tag to install (defaults to the latest release).
+#   VERSION    Release to install, as 0.7.0 or v0.7.0 (defaults to the latest release).
 #   PLUGIN_DIR Override destination directory (defaults to $HOME/.docker/cli-plugins).
 
 set -eu
@@ -45,6 +45,19 @@ if [ -z "$VERSION" ]; then
   echo "error: could not determine latest version; set VERSION explicitly" >&2
   exit 1
 fi
+
+# Releases after 0.6.0 are tagged vX.Y.Z, so add the prefix to a bare
+# version from that point on.
+case "$VERSION" in
+  [0-9]*)
+    major="${VERSION%%.*}"
+    rest="${VERSION#*.}"
+    minor="${rest%%.*}"
+    if [ "$major" -gt 0 ] || [ "$minor" -gt 6 ]; then
+      VERSION="v${VERSION}"
+    fi
+    ;;
+esac
 
 asset="${NAME}-${os}-${arch}"
 url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"

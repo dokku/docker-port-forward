@@ -16,8 +16,10 @@ Each option field maps to the flag or argument of the same name in the [Command 
 ## Installation
 
 ```bash
-go get github.com/dokku/docker-port-forward
+go get github.com/dokku/docker-port-forward@latest
 ```
+
+Releases are tagged `vX.Y.Z`, so a specific release can be pinned with `go get github.com/dokku/docker-port-forward@vX.Y.Z`. Releases up to 0.6.0 were tagged without the `v` prefix and resolve to pseudo-versions.
 
 ## Forward in the background
 
