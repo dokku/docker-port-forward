@@ -4,7 +4,7 @@ go 1.26.11
 
 require (
 	github.com/compose-spec/compose-go/v2 v2.17.0
-	github.com/josegonzalez/cli-skeleton v0.25.0
+	github.com/josegonzalez/cli-skeleton v0.26.0
 	github.com/mitchellh/cli v1.1.5
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/posener/complete v1.2.3
@@ -38,7 +38,7 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
-	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-colorable v0.1.16 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
@@ -60,9 +60,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/term v0.43.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/term v0.48.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
